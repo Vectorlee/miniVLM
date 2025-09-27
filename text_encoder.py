@@ -4,9 +4,9 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 @dataclass
-class GPTConfig:
+class TextEncoderConfig:
     block_size: int = 1024
-    vocab_size: int = 50257
+    vocab_size: int = 50304 # Change the original 50257 token count into a nice numbe
     n_layer: int = 12
     n_head: int = 8
     n_embd: int = 512

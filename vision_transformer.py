@@ -117,7 +117,7 @@ class VisionTransformer(nn.Module):
 
     def forward(self, patches):
 
-        B, T, P = patches.shape() # shape (B, T, P)
+        B, T, P = patches.shape # shape (B, T, P)
         assert T <= self.config.block_size and P == self.config.patch_size
 
         # load the position as the range tensor, add extra 1 for the class embedding
