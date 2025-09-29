@@ -9,23 +9,25 @@ from text_encoder import TextEncoder, TextEncoderConfig
 
 @dataclass
 class CLIPConfig:
-    text_encoder_config: TextEncoderConfig = TextEncoderConfig()
-    vision_encoder_config: VisionTransformerConfig = VisionTransformerConfig()
+    text_config: TextEncoderConfig = TextEncoderConfig()
+    vision_config: VisionTransformerConfig = VisionTransformerConfig()
     hidden_dim: int = 512
 
 
 class CLIPModel(nn.Module):
 
-    def __init__(self, text_config, img_config, hidden_dim):
+    def __init__(self, config):
         super().__init__()
+        self.config = config
 
-        self.text_encoder = TextEncoder(text_config)
-        self.vision_encoder = VisionTransformer(img_config)
+        self.text_encoder = TextEncoder(config.text_config)
+        self.vision_encoder = VisionTransformer(config.vision_config)
 
-        self.text_proj = nn.Linear(text_config.n_embd, hidden_dim)
-        self.vision_proj = nn.Linear(img_config.n_embd, hidden_dim)
+        self.text_proj = nn.Linear(config.text_config.n_embd, config.hidden_dim)
+        self.vision_proj = nn.Linear(config.vision_config.n_embd, config.hidden_dim)
 
-        self.temperature = nn.Parameter(torch.randn(1))
+        # initialize the temperature as 0.07
+        self.temperature = nn.Parameter(torch.tensor([0.07], dtype=torch.float32))
 
 
     def forward(self, input_ids, attention_masks, patches):

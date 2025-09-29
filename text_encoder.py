@@ -5,7 +5,7 @@ from torch.nn import functional as F
 
 @dataclass
 class TextEncoderConfig:
-    block_size: int = 1024
+    block_size: int = 256
     vocab_size: int = 50304 # Change the original 50257 token count into a nice numbe
     n_layer: int = 12
     n_head: int = 8

@@ -6,7 +6,7 @@ from torch.nn import functional as F
 @dataclass
 class VisionTransformerConfig:
     patch_size: int = 16 * 16 * 3
-    block_size: int = 1024
+    block_size: int = 512
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
@@ -113,7 +113,6 @@ class VisionTransformer(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             #torch.nn.init.xavier_normal_(module.weight)
-
 
     def forward(self, patches):
 
