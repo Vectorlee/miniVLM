@@ -4,7 +4,7 @@ import torch
 import math
 import time
 import random
-from clip_dataloader import DataLoaderLite
+from clip_dataloader import DataLoaderLite, ClipDataConfig
 from vision_transformer import VisionTransformer, VisionTransformerConfig
 from text_encoder import TextEncoder, TextEncoderConfig
 from clip_model import CLIPModel, CLIPConfig
@@ -166,22 +166,33 @@ with open(log_file, "w") as f:
 model_dir = "model"
 os.makedirs(model_dir, exist_ok=True)
 
-""""
+
 # use the micro batch size in the data loader
-train_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split='train')
-val_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split='val')
+data_load_config = ClipDataConfig()
+train_loader = DataLoaderLite(
+    config = data_load_config, 
+    process_rank = train_param.ddp_rank,
+    num_processes = train_param.ddp_world_size,
+    split = 'train'
+)
+val_loader = DataLoaderLite(
+    config = data_load_config,
+    process_rank = train_param.ddp_rank,
+    num_processes = train_param.ddp_world_size, 
+    split='val'
+)
 
 # training loop
-for step in range(max_steps):
+for step in range(train_param.max_steps):
     t0 = time.time()
 
     # checkpoint model
-    if step % 1000 == 0 or step == max_steps - 1:
-        if master_process:
+    if step % 10000 == 0 or step == train_param.max_steps - 1:
+        if train_param.master_process:
             torch.save(model.state_dict(), os.path.join(model_dir, f"model_{step}.pth"))
 
     # validation loop
-    if step % 100 == 0 or step == max_steps - 1:
+    if step % 500 == 0 or step == train_param.max_steps - 1:
         model.eval()
         val_loader.reset()
         with torch.no_grad():
@@ -190,16 +201,16 @@ for step in range(max_steps):
             # roughly processing 10M tokens for validation
             val_loss_steps = 40 
             for _ in range(val_loss_steps):
-                x, y = val_loader.next_batch()
-                x, y = x.to(device), y.to(device)
-                with torch.autocast(device_type=device, dtype=torch.bfloat16):
-                    logit, loss = model(x, y)
+                img, text, mask = val_loader.next_batch()
+                img, text, mask = img.to(train_param.device), text.to(train_param.device), mask.to(train_param.device)
+                with torch.autocast(device_type=train_param.device, dtype=torch.bfloat16):
+                    logit, loss = model(input_ids = text, attention_masks = mask, patches = img)
                 loss = loss / val_loss_steps
                 val_loss_accum += loss.detach()
         
-        if ddp:
+        if train_param.ddp:
             dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
-        if master_process:
+        if train_param.master_process:
             print(f"Validation loss: {val_loss_accum.item():.6f}")
             with open(log_file, 'a') as f:
                 f.write(f"{step} val {val_loss_accum.item():.6f}\n")
@@ -209,34 +220,34 @@ for step in range(max_steps):
     optimizer.zero_grad()
     loss_accum = 0.0
 
-    for micro_step in range(grad_accum_steps):
-        x, y = train_loader.next_batch()
-        x, y = x.to(device), y.to(device)
+    for micro_step in range(train_param.grad_accum_steps):
+        img, text, mask = train_loader.next_batch()
+        img, text, mask = img.to(train_param.device), text.to(train_param.device), mask.to(train_param.device)
 
         # mixed precision training
-        with torch.autocast(device_type=device, dtype=torch.bfloat16):
-            not_last_microstep = micro_step < grad_accum_steps - 1
+        with torch.autocast(device_type=train_param.device, dtype=torch.bfloat16):
+            not_last_microstep = micro_step < train_param.grad_accum_steps - 1
 
-            if ddp and not_last_microstep:
+            if train_param.ddp and not_last_microstep:
                 with model.no_sync():
                     # no_sync context requires the forward pass also resides in the context
-                    logits, loss = model(x, y)
+                    logits, loss = model(input_ids = text, attention_masks = mask, patches = img)
 
                     # the micro batch lost the normalizer
                     # so we divide the loss by the number of micro step count
-                    loss = loss / grad_accum_steps
+                    loss = loss / train_param.grad_accum_steps
                     loss_accum += loss.detach()
                     # because we didn't zero the grad, the gradient will accumulate
                     loss.backward()
             else:
                 # without the no_sync context manager here
-                logits, loss = model(x, y)
-                loss = loss / grad_accum_steps
+                logits, loss = model(input_ids = text, attention_masks = mask, patches = img)
+                loss = loss / train_param.grad_accum_steps
                 loss_accum += loss.detach()
                 # For the ddp case, the gradients will be synchronized across devices
                 loss.backward()
 
-    if ddp:
+    if train_param.ddp:
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
 
     # Gradient Clipping
@@ -249,17 +260,17 @@ for step in range(max_steps):
         param_group['lr'] = lr
 
     optimizer.step()
-    t1 = time.time()
 
+    t1 = time.time()
     dt = (t1 - t0)
-    token_processed = B * T * grad_accum_steps * ddp_world_size
-    token_per_sec = token_processed / dt
+    #token_processed = B * T * grad_accum_steps * ddp_world_size
+    #token_per_sec = token_processed / dt
     # the item() function ship the tensor back from gpu to cpu
-    if master_process:
-        print(f"step {step}, loss: {loss_accum.item():.6f}, dt: {dt * 1000:.2f}ms, tok/sec: {token_per_sec}, norm: {norm:.4f}, lr: {lr:e}")
+    if train_param.master_process:
+        print(f"step {step}, loss: {loss_accum.item():.6f}, dt: {dt * 1000:.2f}ms, norm: {norm:.4f}, lr: {lr:e}")
         with open(log_file, 'a') as f:
             f.write(f"{step} train {loss_accum.item():.6f}\n")
-"""
+
 
 if train_param.ddp:
     destroy_process_group()

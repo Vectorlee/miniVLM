@@ -46,8 +46,10 @@ class CLIPModel(nn.Module):
         text_projs = F.normalize(self.text_proj(text_encodings), p=2.0, dim=1)
         vision_projs = F.normalize(self.vision_proj(vision_encodings), p=2.0, dim=1)
 
+        # make sure the scaler does not exceed 100
+        scaler = torch.clamp(torch.exp(self.temperature), max=100)
         # [B1, hidden_dim] @ [hidden_dim, B2]
-        logits = vision_projs @ text_projs.transpose(0, 1) * torch.exp(self.temperature)
+        logits = vision_projs @ text_projs.transpose(0, 1) * scaler
 
         labels = torch.arange(B1, device=patches.device)
         loss_i = F.cross_entropy(logits, labels)
