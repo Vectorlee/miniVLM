@@ -6,32 +6,32 @@ import tiktoken
 from dataclasses import dataclass
 from util import load_image, extract_patches, tokenize, get_padding_batch_tensor
 
-DATA_ROOT = "pretrain_data"
-
-@dataclass
-class ClipDataConfig:
-    img_resolution: int = 224
-    patch_dimension: int = 16
-    batch_size: int = 4096
-    caption_length: int = 128
+DATA_ROOT = "clip_data/"
+INPUT_KEY = "input_ids"
+MASK_KEY = "attention_masks"
+PATCH_KEY = "image_patches"
 
 
 class DataLoaderLite:
 
-    def __init__(self, config, process_rank, num_processes, split):
-        self.B = config.batch_size
-        self.T = config.caption_length
-        self.resolution = config.img_resolution
-        self.patch_width = config.patch_dimension
-
+    def __init__(self, batch_size, process_rank, num_processes, split):
+        self.batch_size = batch_size
         self.process_rank = process_rank
         self.num_processes = num_processes
+
+        self.current_shard = process_rank
+        self.current_data = {}
+        self.data_index = 0
         assert split in ('train', 'val')
 
         # list the file
         data_root = DATA_ROOT
         shards = os.listdir(data_root)
-        shards = [s for s in shards if split in s]
+        if split == 'val':
+            shards = [s for s in shards if s.startswith("val_")]
+        else:
+            shards = [s for s in shards if not s.startswith("val_")]
+        
         shards = sorted(shards)
         shards = [os.path.join(data_root, s) for s in shards]
         self.shards = shards
@@ -42,25 +42,46 @@ class DataLoaderLite:
 
 
     def reset(self):
-        # set the starting shard randomly to create some randomness in data loading
-        self.current_shard = random.randint(0, len(self.shards)) % len(self.shards)
-        pass
+        # each process starts from their corresponding index
+        self.current_shard = self.process_rank
+        self.data_index = 0
+
+        data = torch.load(self.shards[self.current_shard])
+        assert isinstance(data, dict)
+        assert (INPUT_KEY in data) and (MASK_KEY in data) and (PATCH_KEY in data)
+        
+        self.current_data = data
+        return
+    
+
+    def get_data(self, tensor_data, start, end):
+        caption_input_ids = tensor_data[INPUT_KEY][start: end]
+        caption_attention_masks = tensor_data[MASK_KEY][start: end]
+        image_patches = tensor_data[PATCH_KEY][start: end]
+
+        return caption_input_ids, caption_attention_masks, image_patches
+
 
     def next_batch(self):
 
-        # load image and their captions
-        # PLACEHOLDER
-        image_file_list = [""] * self.B
-        caption_list = [""] * self.B
+        caption_input_ids, caption_attention_masks, image_patches = \
+            self.get_data(self.current_data, self.data_index, self.data_index + self.batch_size)
+        
+        if self.data_index + self.batch_size > len(self.current_data[PATCH_KEY]):
+            self.data_index = self.data_index + self.batch_size - len(self.current_data[PATCH_KEY])
 
-        image_tensors = [load_image(filename, self.resolution) for filename in image_file_list]
+            # load new data shard, each process will load its corresponding next shard
+            self.current_shard = (self.current_shard + self.num_processes) % len(self.shards)
+            self.current_data = torch.load(self.shards[self.current_shard])
 
-        # [14 * 14, 3 * 16 * 16] * B
-        batch_patches = [extract_patches(x, self.patch_width) for x in image_tensors]
-        batch_patches = torch.stack(batch_patches, dim=0) # [B, 14 * 14, 3 * 16 * 16]
+            new_input_ids, new_attention_masks, new_image_patches = \
+                self.get_data(self.current_data, 0, self.data_index)
+            
+            caption_input_ids = torch.stack(caption_input_ids, new_input_ids)
+            caption_attention_masks = torch.stack(caption_attention_masks, new_attention_masks)
+            image_patches = torch.stack(image_patches, new_image_patches)
+            
+        else:
+            self.data_index = self.data_index + self.batch_size
 
-        caption_tokens = [tokenize(txt) for txt in caption_list]
-        caption_input_ids, caption_attention_mask = get_padding_batch_tensor(caption_list, self.T)
-
-
-        return batch_patches, caption_input_ids, caption_attention_mask
+        return caption_input_ids, caption_attention_masks, image_patches

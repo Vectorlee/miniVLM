@@ -39,6 +39,7 @@ class CLIPModel(nn.Module):
         img_embds = self.vision_encoder(patches)  # [B2, T2 + 1, C2]
 
         indexes = attention_masks.sum(dim=1) # [B1,]
+        # the last token embedding
         text_encodings = text_embds[torch.arange(B1, device=input_ids.device), indexes] # [B1, C1]
         # the first class embedding
         vision_encodings = img_embds[torch.arange(B2, device=patches.device), 0] # [B2, C2]

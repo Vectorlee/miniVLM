@@ -4,9 +4,7 @@ import torch
 import math
 import time
 import random
-from clip_dataloader import DataLoaderLite, ClipDataConfig
-from vision_transformer import VisionTransformer, VisionTransformerConfig
-from text_encoder import TextEncoder, TextEncoderConfig
+from clip_dataloader import DataLoaderLite
 from clip_model import CLIPModel, CLIPConfig
 
 import torch.distributed as dist
@@ -168,18 +166,17 @@ os.makedirs(model_dir, exist_ok=True)
 
 
 # use the micro batch size in the data loader
-data_load_config = ClipDataConfig()
 train_loader = DataLoaderLite(
-    config = data_load_config, 
+    batch_size = train_param.micro_batch_size, 
     process_rank = train_param.ddp_rank,
     num_processes = train_param.ddp_world_size,
     split = 'train'
 )
 val_loader = DataLoaderLite(
-    config = data_load_config,
+    batch_size = train_param.micro_batch_size,
     process_rank = train_param.ddp_rank,
     num_processes = train_param.ddp_world_size, 
-    split='val'
+    split = 'val'
 )
 
 # training loop
@@ -201,8 +198,9 @@ for step in range(train_param.max_steps):
             # roughly processing 10M tokens for validation
             val_loss_steps = 40 
             for _ in range(val_loss_steps):
-                img, text, mask = val_loader.next_batch()
-                img, text, mask = img.to(train_param.device), text.to(train_param.device), mask.to(train_param.device)
+                text, mask, img = val_loader.next_batch()
+                text, mask, img = text.to(train_param.device), mask.to(train_param.device), img.to(train_param.device)
+
                 with torch.autocast(device_type=train_param.device, dtype=torch.bfloat16):
                     logit, loss = model(input_ids = text, attention_masks = mask, patches = img)
                 loss = loss / val_loss_steps
@@ -221,8 +219,8 @@ for step in range(train_param.max_steps):
     loss_accum = 0.0
 
     for micro_step in range(train_param.grad_accum_steps):
-        img, text, mask = train_loader.next_batch()
-        img, text, mask = img.to(train_param.device), text.to(train_param.device), mask.to(train_param.device)
+        text, mask, img = train_loader.next_batch()
+        text, mask, img = text.to(train_param.device), mask.to(train_param.device), img.to(train_param.device)
 
         # mixed precision training
         with torch.autocast(device_type=train_param.device, dtype=torch.bfloat16):
@@ -263,9 +261,6 @@ for step in range(train_param.max_steps):
 
     t1 = time.time()
     dt = (t1 - t0)
-    #token_processed = B * T * grad_accum_steps * ddp_world_size
-    #token_per_sec = token_processed / dt
-    # the item() function ship the tensor back from gpu to cpu
     if train_param.master_process:
         print(f"step {step}, loss: {loss_accum.item():.6f}, dt: {dt * 1000:.2f}ms, norm: {norm:.4f}, lr: {lr:e}")
         with open(log_file, 'a') as f:
