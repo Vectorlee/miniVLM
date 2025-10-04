@@ -11,6 +11,17 @@ import json
 import os
 
 """
+# download the laion-400m data using the img2dataset command
+
+wget -l1 -r --no-parent https://the-eye.eu/public/AI/cah/laion400m-met-release/laion400m-meta/
+mv the-eye.eu/public/AI/cah/laion400m-met-release/laion400m-meta/ .
+
+img2dataset --url_list laion400m-meta --input_format "parquet"\
+         --url_col "URL" --caption_col "TEXT" --output_format webdataset\
+           --output_folder laion400m-data --processes_count 16 --thread_count 128 --image_size 256\
+             --save_additional_columns '["NSFW","similarity","LICENSE"]' --enable_wandb True
+
+
 # First use the following bash script to untar the img2dataset dataset
 
 for f in *.tar; do
@@ -99,8 +110,8 @@ def convert_data_into_tensor(file_dir, json_file_list, output_file):
             caption = data['caption']
             
             # skip non-English captions
-            if detect(caption) != 'en':
-                continue
+            # if detect(caption) != 'en':
+            #    continue
             
             # skip over size captions
             tokens = tokenize(caption)
@@ -118,7 +129,7 @@ def convert_data_into_tensor(file_dir, json_file_list, output_file):
     # convert the input into padded tensor
     input_ids, attention_masks = get_padding_batch_input(text_token_list)
     # covert list into tensor
-    image_patches = torch.tensor(img_patch_list)
+    image_patches = torch.stack(img_patch_list, dim=0)
 
     torch.save({
         INPUT_KEY: input_ids,
@@ -134,7 +145,7 @@ def convert_data_into_tensor(file_dir, json_file_list, output_file):
 def prepare_training_data(tar_dir):
     
     file_list = os.listdir(tar_dir)
-    json_file_list = list(filter(lambda s: s.endswith(".json"), file_list))
+    json_file_list = [s for s in file_list if s.endswith(".json")]
     output_file = tar_dir + "_data.pth"
 
     # the output file will be written in the current directory
@@ -143,11 +154,11 @@ def prepare_training_data(tar_dir):
 
 
 if __name__ == "__main__":
-    tar_suffix = "_tar"
+    tar_suffix = "_dir"
 
     # list current directory
     tar_dir_list = os.listdir(".")
-    tar_dir_list = list(filter(lambda s: s.endswith(tar_suffix), tar_dir_list))
+    tar_dir_list = [s for s in tar_dir_list if s.endswith(tar_suffix)]
 
     # the file torch pth file will be stored in the current directory
     data_file_list = []
