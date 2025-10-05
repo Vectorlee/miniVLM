@@ -1,87 +1,95 @@
-import os
-import torch
-import numpy as np
-import random
+import webdataset as wds
+from torchvision import transforms
+from torch.nn.utils.rnn import pad_sequence
 import tiktoken
-from dataclasses import dataclass
-from util import load_image, extract_patches, tokenize, get_padding_batch_tensor
+import torch
+import torch.distributed as dist
 
-DATA_ROOT = "clip_data/"
-INPUT_KEY = "input_ids"
-MASK_KEY = "attention_masks"
-PATCH_KEY = "image_patches"
+TRAIN_DATA_PATTERN = "clip_data/training_data/{00000..11499}.tar"
+VAL_DATA_PATTERN = "clip_data/validation_data/{00000..0031}.tar"
+
+#initilize tokenizer
+enc = tiktoken.get_encoding("gpt2")
+eot = enc._special_tokens['<|endoftext|>']
+
+def tokenize(text):
+    tokens = []
+    tokens.extend(enc.encode_ordinary(text))
+    tokens.append(eot)
+    return tokens
+
+
+def create_dataloader(shard_pattern, batch_size):
+
+    image_transform = transforms.Compose([
+        # the image has already been resize by img2dataset
+        transforms.ToTensor(),           # convert to tensor [C, H, W] in [0,1]
+        transforms.Normalize(            # normalize with mean/std
+            mean=[0.485, 0.456, 0.406], 
+            std=[0.229, 0.224, 0.225]
+        )
+    ])
+
+    def caption_transform(json_data):
+        caption = json_data['caption']
+        tokens = tokenize(caption)
+        return tokens
+
+    def filter_sample(sample):
+        _, caption_token = sample
+        return len(caption_token) < 128
+
+    dataset = (
+        wds.WebDataset(shard_pattern, resampled=True, shardshuffle=True)
+        .shuffle(1000)  # sample-level shuffle buffer
+        .decode("pil")  # decode jpg->PIL
+        .to_tuple("jpg", "json")
+        .map_tuple(image_transform, caption_transform)
+        .select(filter_sample)
+        .batched(batch_size)
+    )
+
+    # shard dataset across ranks
+    if dist.is_initialized():
+        dataset = dataset.shard(dist.get_world_size(), dist.get_rank())
+
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=None,
+        num_workers=4,
+    )
+
+    return loader
+
+
+def get_padding_batch_input(token_batch):
+    input_list = []
+    mask_list = []
+
+    for tokens in token_batch:
+        input_list.append(torch.tensor(tokens, dtype=torch.int64))
+        mask_list.append(torch.ones(len(tokens), dtype=torch.int64))
+    
+    input_ids = pad_sequence(input_list, batch_first=True)
+    attention_masks = pad_sequence(mask_list, batch_first=True)
+    
+    return input_ids, attention_masks
 
 
 class DataLoaderLite:
 
-    def __init__(self, batch_size, process_rank, num_processes, split):
-        self.batch_size = batch_size
-        self.process_rank = process_rank
-        self.num_processes = num_processes
-
-        self.current_shard = process_rank
-        self.current_data = {}
-        self.data_index = 0
+    def __init__(self, batch_size, split):
         assert split in ('train', 'val')
-
-        # list the file
-        data_root = DATA_ROOT
-        shards = os.listdir(data_root)
-        if split == 'val':
-            shards = [s for s in shards if s.startswith("val_")]
-        else:
-            shards = [s for s in shards if not s.startswith("val_")]
         
-        shards = sorted(shards)
-        shards = [os.path.join(data_root, s) for s in shards]
-        self.shards = shards
-        assert len(shards) > 0, f"No shards found for {split} under {data_root}"
-        print(f"Found {len(shards)} shards for split {split}")
-
-        self.reset()
-
-
-    def reset(self):
-        # each process starts from their corresponding index
-        self.current_shard = self.process_rank
-        self.data_index = 0
-
-        data = torch.load(self.shards[self.current_shard])
-        assert isinstance(data, dict)
-        assert (INPUT_KEY in data) and (MASK_KEY in data) and (PATCH_KEY in data)
+        self.batch_size = batch_size
+        self.shard_pattern = TRAIN_DATA_PATTERN if split == 'train' else VAL_DATA_PATTERN
         
-        self.current_data = data
-        return
-    
-
-    def get_data(self, tensor_data, start, end):
-        caption_input_ids = tensor_data[INPUT_KEY][start: end]
-        caption_attention_masks = tensor_data[MASK_KEY][start: end]
-        image_patches = tensor_data[PATCH_KEY][start: end]
-
-        return caption_input_ids, caption_attention_masks, image_patches
-
+        self.dataloader_iter = iter(create_dataloader(self.shard_pattern, batch_size))
 
     def next_batch(self):
+        img_batch, token_batch = next(self.dataloader_iter)
+        input_ids, attention_masks = get_padding_batch_input(token_batch)
 
-        caption_input_ids, caption_attention_masks, image_patches = \
-            self.get_data(self.current_data, self.data_index, self.data_index + self.batch_size)
-        
-        if self.data_index + self.batch_size > len(self.current_data[PATCH_KEY]):
-            self.data_index = self.data_index + self.batch_size - len(self.current_data[PATCH_KEY])
+        return input_ids, attention_masks, img_batch
 
-            # load new data shard, each process will load its corresponding next shard
-            self.current_shard = (self.current_shard + self.num_processes) % len(self.shards)
-            self.current_data = torch.load(self.shards[self.current_shard])
 
-            new_input_ids, new_attention_masks, new_image_patches = \
-                self.get_data(self.current_data, 0, self.data_index)
-            
-            caption_input_ids = torch.stack(caption_input_ids, new_input_ids)
-            caption_attention_masks = torch.stack(caption_attention_masks, new_attention_masks)
-            image_patches = torch.stack(image_patches, new_image_patches)
-            
-        else:
-            self.data_index = self.data_index + self.batch_size
-
-        return caption_input_ids, caption_attention_masks, image_patches

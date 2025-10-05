@@ -168,14 +168,10 @@ os.makedirs(model_dir, exist_ok=True)
 # use the micro batch size in the data loader
 train_loader = DataLoaderLite(
     batch_size = train_param.micro_batch_size, 
-    process_rank = train_param.ddp_rank,
-    num_processes = train_param.ddp_world_size,
     split = 'train'
 )
 val_loader = DataLoaderLite(
     batch_size = train_param.micro_batch_size,
-    process_rank = train_param.ddp_rank,
-    num_processes = train_param.ddp_world_size, 
     split = 'val'
 )
 
@@ -202,7 +198,7 @@ for step in range(train_param.max_steps):
                 text, mask, img = text.to(train_param.device), mask.to(train_param.device), img.to(train_param.device)
 
                 with torch.autocast(device_type=train_param.device, dtype=torch.bfloat16):
-                    logit, loss = model(input_ids = text, attention_masks = mask, patches = img)
+                    logit, loss = model(input_ids = text, attention_masks = mask, img_tensor = img)
                 loss = loss / val_loss_steps
                 val_loss_accum += loss.detach()
         
@@ -229,7 +225,7 @@ for step in range(train_param.max_steps):
             if train_param.ddp and not_last_microstep:
                 with model.no_sync():
                     # no_sync context requires the forward pass also resides in the context
-                    logits, loss = model(input_ids = text, attention_masks = mask, patches = img)
+                    logits, loss = model(input_ids = text, attention_masks = mask, img_tensor = img)
 
                     # the micro batch lost the normalizer
                     # so we divide the loss by the number of micro step count
@@ -239,7 +235,7 @@ for step in range(train_param.max_steps):
                     loss.backward()
             else:
                 # without the no_sync context manager here
-                logits, loss = model(input_ids = text, attention_masks = mask, patches = img)
+                logits, loss = model(input_ids = text, attention_masks = mask, img_tensor = img)
                 loss = loss / train_param.grad_accum_steps
                 loss_accum += loss.detach()
                 # For the ddp case, the gradients will be synchronized across devices

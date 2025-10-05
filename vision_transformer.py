@@ -5,8 +5,9 @@ from torch.nn import functional as F
 
 @dataclass
 class VisionTransformerConfig:
-    patch_size: int = 16 * 16 * 3
-    block_size: int = 512
+    img_resolution: int = 224
+    patch_size: int = 16
+    block_size: int = 256
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
@@ -82,11 +83,16 @@ class VisionTransformer(nn.Module):
         super().__init__()
         self.config = config
 
+        self.patch_embd = nn.Conv2d(
+            in_channels = 3,
+            out_channels = config.n_embd,
+            kernel_size = config.patch_size,
+            stride = config.patch_size
+        )
         self.cls_embd = nn.Parameter(torch.randn(config.n_embd))
 
         self.transformer = nn.ModuleDict(
             dict(
-                wproj = nn.Linear(config.patch_size, config.n_embd),
                 wpe = nn.Embedding(config.block_size, config.n_embd),
                 h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
                 ln_f = nn.LayerNorm(config.n_embd),
@@ -114,21 +120,24 @@ class VisionTransformer(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             #torch.nn.init.xavier_normal_(module.weight)
 
-    def forward(self, patches):
+    def forward(self, img_tensor):
+        B, C, H, W = img_tensor.shape
+        assert C == 3 and H == self.config.img_resoltion and W == self.config.img_resolution
 
-        B, T, P = patches.shape # shape (B, T, P)
-        assert T <= self.config.block_size and P == self.config.patch_size
+        # [B, n_embd, n_patch_h, n_patch_w]
+        patches = self.patch_embd(img_tensor)
+        # [B, T, n_embd]
+        patches = patches.view(B, self.config.n_embd, -1).transpose(1, 2)
 
         # load the position as the range tensor, add extra 1 for the class embedding
+        _, T, _ = patches.shape
         pos = torch.arange(0, T + 1, dtype=torch.long, device=patches.device)
         pos_emb = self.transformer.wpe(pos) # shape (T + 1, n_embd)
 
-        # map the image patches into internal representation
-        img_emb = self.transformer.wproj(patches) # shape (B, T, n_embd)
-
         # add the class embedding
+        # [B, 1, n_embd]
         expanded_cls_emb = self.cls_embd.unsqueeze(0).expand(B, 1, -1)
-        augmented_emb = torch.cat((expanded_cls_emb, img_emb), dim=1) # shape (B, T + 1, n_embd)
+        augmented_emb = torch.cat((expanded_cls_emb, patches), dim=1) # shape (B, T + 1, n_embd)
 
         # patch embeding + position embedding
         x = augmented_emb + pos_emb
