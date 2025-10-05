@@ -38,7 +38,7 @@ class CLIPModel(nn.Module):
         text_embds = self.text_encoder(input_ids) # [B1, T1, C1]
         img_embds = self.vision_encoder(img_tensor)  # [B2, T2 + 1, C2]
 
-        indexes = attention_masks.sum(dim=1) # [B1,]
+        indexes = attention_masks.sum(dim=1) - 1 # [B1,]
         # the last token embedding
         text_encodings = text_embds[torch.arange(B1, device=text_embds.device), indexes] # [B1, C1]
         # the first class embedding

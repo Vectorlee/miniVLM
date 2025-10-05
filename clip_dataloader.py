@@ -8,6 +8,8 @@ import torch.distributed as dist
 TRAIN_DATA_PATTERN = "clip_data/training_data/{00000..11499}.tar"
 VAL_DATA_PATTERN = "clip_data/validation_data/{00000..0031}.tar"
 
+TEXT_LENGTH_LIMIT = 128
+
 #initilize tokenizer
 enc = tiktoken.get_encoding("gpt2")
 eot = enc._special_tokens['<|endoftext|>']
@@ -37,7 +39,7 @@ def create_dataloader(shard_pattern, batch_size):
 
     def filter_sample(sample):
         _, caption_token = sample
-        return len(caption_token) < 128
+        return len(caption_token) < TEXT_LENGTH_LIMIT
 
     dataset = (
         wds.WebDataset(shard_pattern, resampled=True, shardshuffle=True)

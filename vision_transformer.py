@@ -122,7 +122,7 @@ class VisionTransformer(nn.Module):
 
     def forward(self, img_tensor):
         B, C, H, W = img_tensor.shape
-        assert C == 3 and H == self.config.img_resoltion and W == self.config.img_resolution
+        assert C == 3 and H == self.config.img_resolution and W == self.config.img_resolution
 
         # [B, n_embd, n_patch_h, n_patch_w]
         patches = self.patch_embd(img_tensor)
