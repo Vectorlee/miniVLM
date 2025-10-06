@@ -30,16 +30,20 @@ class CLIPTrainingParam:
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     # learning rate parameters
-    max_lr = 6e-4
+    max_lr = 5e-4
     min_lr = max_lr * 0.1
     num_epoch = 32
+    
+    max_steps = 1800
+    warmup_steps = 600
+    adam_beta1 = 0.9
+    adam_beta2 = 0.98
+    adam_eps = 1e-6
+    weight_decay = 0.2
 
-    max_steps = 19073
-    warmup_steps = 715
-
-    total_batch_size = 32768 # 2**15, in number of tokens, nice number
-    micro_batch_size = 32  # micro batch size
-    grad_accum_steps = 400
+    total_batch_size = 32768 # 2**15
+    micro_batch_size = 64  # micro batch size
+    grad_accum_steps = 64
 
 
 
@@ -50,16 +54,19 @@ def config_ddp(train_config: CLIPTrainingParam):
     if ddp:
         train_config.ddp_enabled = True
 
-        # now we need cuda
-        assert torch.cuda.is_available(), "Need CUDA for DDP"
-        init_process_group(backend="nccl")
-
         train_config.ddp_rank = int(os.environ['RANK'])
         train_config.ddp_local_rank = int(os.environ['LOCAL_RANK'])
         train_config.ddp_world_size = int(os.environ['WORLD_SIZE'])
         train_config.device = f'cuda:{train_config.ddp_local_rank}'
+
+        # now we need cuda
+        assert torch.cuda.is_available(), "Need CUDA for DDP"        
+        init_process_group(
+            backend = "nccl",
+            world_size = train_config.ddp_world_size,
+            rank = train_config.ddp_local_rank
+        )
         
-        # TODO() Move this to the central config function 
         train_config.master_process = train_config.ddp_rank == 0
     else:
         # Vanilla
@@ -74,7 +81,7 @@ def config_ddp(train_config: CLIPTrainingParam):
 
 
 
-def get_lr(it, train_config):
+def get_lr(it, train_config: CLIPTrainingParam):
     # linear warmup for warmup_iters steps
     if it < train_config.warmup_steps:
         return train_config.max_lr * (it + 1) / train_config.warmup_steps
@@ -91,7 +98,7 @@ def get_lr(it, train_config):
 
 
 
-def configure_optimizers(model, weight_decay, learning_rate):
+def configure_optimizers(model, train_config: CLIPTrainingParam):
     # start with all of the parameters that require grad
     param_dict = {pn: p for pn, p in model.named_parameters()}
     param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
@@ -100,16 +107,23 @@ def configure_optimizers(model, weight_decay, learning_rate):
     # do not weight decay bias, layernorm, and other less than 2 dimension weights
     nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
     optim_groups = [
-        {"params": decay_params, "weight_decay": weight_decay},
+        {"params": decay_params, "weight_decay": train_config.weight_decay},
         {"params": nodecay_params, "weight_decay": 0.0}
     ]
     num_decay_params = sum(p.numel() for p in decay_params)
     num_nodecay_params = sum(p.numel() for p in nodecay_params)
-    print(f"num decayed tensors: {len(decay_params)}, with {num_decay_params} parameters")
-    print(f"num non-decayed tensors: {len(nodecay_params)}, with {num_nodecay_params} parameters")
+    if train_config.master_process:
+        print(f"num decayed tensors: {len(decay_params)}, with {num_decay_params} parameters")
+        print(f"num non-decayed tensors: {len(nodecay_params)}, with {num_nodecay_params} parameters")
 
     fused = True if torch.cuda.is_available() else False
-    optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.98), eps=1e-6, fused=fused)
+    optimizer = torch.optim.AdamW(
+        optim_groups, 
+        lr = train_config.min_lr,
+        betas = (train_config.adam_beta1, train_config.adam_beta2),
+        eps = train_config.adam_eps,
+        fused = fused
+    )
     return optimizer
 
 
@@ -130,7 +144,7 @@ def load_clip_model(train_config: CLIPTrainingParam):
     # compile the model, for kernel fuse
     model = torch.compile(model)
 
-    optimizer = configure_optimizers(model, weight_decay=0.2, learning_rate=6e-4)
+    optimizer = configure_optimizers(model, train_config)
 
     return model, optimizer
 
@@ -141,6 +155,10 @@ train_param = CLIPTrainingParam()
 
 # config DDP settings
 train_param = config_ddp(train_param)
+# set up grad accum step
+train_param.grad_accum_steps = \
+    train_param.total_batch_size // train_param.ddp_world_size // train_param.micro_batch_size
+
 if train_param.master_process:
     print(f"Is DDP enabled: {train_param.ddp}")
     print(f"DDP word_size: {train_param.ddp_world_size}, DDP rank: {train_param.ddp_rank}")
@@ -180,9 +198,9 @@ for step in range(train_param.max_steps):
     t0 = time.time()
 
     # checkpoint model
-    if step % 10000 == 0 or step == train_param.max_steps - 1:
-        if train_param.master_process:
-            torch.save(model.state_dict(), os.path.join(model_dir, f"model_{step}.pth"))
+    # if step % 10000 == 0 or step == train_param.max_steps - 1:
+    #    if train_param.master_process:
+    #        torch.save(model.state_dict(), os.path.join(model_dir, f"model_{step}.pth"))
 
     # validation loop
     if step % 500 == 0 or step == train_param.max_steps - 1:
