@@ -48,8 +48,7 @@ class CLIPTrainingParam:
     weight_decay = 0.2
 
     total_batch_size = 32768 # 2**15
-    micro_batch_size = 64  # micro batch size
-    grad_accum_steps = 64
+    micro_batch_size = 128  # micro batch size
 
 
 
@@ -58,6 +57,8 @@ def config_ddp(train_config: CLIPTrainingParam):
     # torchrun creates these environment variables
     ddp = int(os.environ.get('RANK', -1)) != -1 
     if ddp:
+        # now we need cuda
+        assert torch.cuda.is_available(), "Need CUDA for DDP"
         train_config.ddp_enabled = True
 
         train_config.ddp_rank = int(os.environ['RANK'])
@@ -65,8 +66,6 @@ def config_ddp(train_config: CLIPTrainingParam):
         train_config.ddp_world_size = int(os.environ['WORLD_SIZE'])
         train_config.device = f'cuda:{train_config.ddp_local_rank}'
 
-        # now we need cuda
-        assert torch.cuda.is_available(), "Need CUDA for DDP"        
         init_process_group(
             backend = "nccl",
             world_size = train_config.ddp_world_size,
@@ -164,6 +163,9 @@ def all_gather_with_grad(tensor):
     world_size = dist.get_world_size()
     tensors_gather = [torch.zeros_like(tensor) for _ in range(world_size)]
     dist.all_gather(tensors_gather, tensor)
+
+    # ensure local copy is preserved for autograd
+    tensors_gather[dist.get_rank()] = tensor
     return torch.cat(tensors_gather, dim=0)
 
 
@@ -173,17 +175,12 @@ train_param = CLIPTrainingParam()
 
 # config DDP settings
 train_param = config_ddp(train_param)
-# set up grad accum step
-train_param.grad_accum_steps = \
-    train_param.total_batch_size // train_param.ddp_world_size // train_param.micro_batch_size
 
-if train_param.master_process:
-    print(f"Is DDP enabled: {train_param.ddp}")
-    print(f"DDP word_size: {train_param.ddp_world_size}, DDP rank: {train_param.ddp_rank}")
-    print(f"Device using: {train_param.device}")
-    print(f"Total desired batch size: {train_param.total_batch_size}")
-    print(f"=> calculated gradient accumulation steps: {train_param.grad_accum_steps}")
+print(f"Is DDP enabled: {train_param.ddp_enabled}")
+print(f"DDP word_size: {train_param.ddp_world_size}, DDP rank: {train_param.ddp_rank}")
+print(f"Device using: {train_param.device}")
 
+# set device
 torch.cuda.set_device(train_param.device)
 torch.set_float32_matmul_precision('high')
 
@@ -216,14 +213,14 @@ for step in range(train_param.max_steps):
     t0 = time.time()
 
     # checkpoint model
-    # if step % 10000 == 0 or step == train_param.max_steps - 1:
-    #    if train_param.master_process:
-    #        torch.save(model.state_dict(), os.path.join(model_dir, f"model_{step}.pth"))
+    if step % 10000 == 0 or step == train_param.max_steps - 1:
+        if train_param.master_process:
+            torch.save(model.state_dict(), os.path.join(model_dir, f"model_{step}.pth"))
 
     # validation loop
-    if step % 500 == 0 or step == train_param.max_steps - 1:
+    if step % 1000 == 0 or step == train_param.max_steps - 1:
         model.eval()
-        val_loader.reset()
+        
         with torch.no_grad():
             val_loss_accum = 0.0
             for _ in range(train_param.val_steps):
@@ -248,32 +245,27 @@ for step in range(train_param.max_steps):
     # training loop
     model.train()
     optimizer.zero_grad()
-    loss_accum = 0.0
 
-    for micro_step in range(train_param.grad_accum_steps):
-        text, mask, img = train_loader.next_batch()
-        text, mask, img = text.to(train_param.device), mask.to(train_param.device), img.to(train_param.device)
+    text, mask, img = train_loader.next_batch()
+    text, mask, img = text.to(train_param.device), mask.to(train_param.device), img.to(train_param.device)
 
-        # mixed precision training
-        with torch.autocast(device_type=train_param.device, dtype=torch.bfloat16):
-            text_embds, vision_embds, scaler = model(input_ids = text, attention_masks = mask, img_tensor = img)
+    # mixed precision training
+    with torch.autocast(device_type=train_param.device, dtype=torch.bfloat16):
+        text_embds, vision_embds, scaler = model(input_ids = text, attention_masks = mask, img_tensor = img)
 
-            # get embeddings from other GPUs
-            global_text_embds = all_gather_with_grad(text_embds)
-            global_vision_embds = all_gather_with_grad(vision_embds)
+        # get embeddings from other GPUs
+        global_text_embds = all_gather_with_grad(text_embds)
+        global_vision_embds = all_gather_with_grad(vision_embds)
             
-            loss = clip_loss(global_text_embds, global_vision_embds, scaler)
-            loss.backward()
-
-    if train_param.ddp:
-        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
+        loss = clip_loss(global_text_embds, global_vision_embds, scaler)
+        loss.backward()
 
     # Gradient Clipping
     # Before the optimizer.step, but after the loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
     # set the cosine decay learing rate
-    lr = get_lr(step)
+    lr = get_lr(step, train_param)
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
@@ -282,10 +274,10 @@ for step in range(train_param.max_steps):
     t1 = time.time()
     dt = (t1 - t0)
     if train_param.master_process:
-        print(f"step {step}, loss: {loss_accum.item():.6f}, dt: {dt * 1000:.2f}ms, norm: {norm:.4f}, lr: {lr:e}")
+        print(f"step {step}, loss: {loss.item():.6f}, dt: {dt * 1000:.2f}ms, norm: {norm:.4f}, lr: {lr:e}")
         with open(log_file, 'a') as f:
-            f.write(f"{step} train {loss_accum.item():.6f}\n")
+            f.write(f"{step} train {loss.item():.6f}\n")
 
 
-if train_param.ddp:
+if train_param.ddp_enabled:
     destroy_process_group()

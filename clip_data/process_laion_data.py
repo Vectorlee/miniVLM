@@ -12,7 +12,3 @@ img2dataset --url_list laion400m-meta --input_format "parquet"\
 
 select some tars as training data and some for validation data
 """
-
-    
-
-

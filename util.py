@@ -2,8 +2,8 @@ import torch
 import tiktoken
 import numpy as np
 from torchvision import transforms
+from torch.nn.utils.rnn import pad_sequence
 from PIL import Image
-
 
 #initilize tokenizer
 enc = tiktoken.get_encoding("gpt2")
@@ -17,21 +17,18 @@ def tokenize(text):
     return tokens
 
 
-def get_padding_batch_tensor(token_batch, T):
-    max_length = T
-    input_ids = []
-    attention_masks = []
+def get_padding_batch_input(token_batch):
+    input_list = []
+    mask_list = []
 
     for tokens in token_batch:
-        padded_tokens = tokens + [0] * (max_length - len(tokens))
-        padded_masks = [1] * len(tokens) + [0] * (max_length - len(tokens))
-
-        input_ids.append(padded_tokens)
-        attention_masks.append(padded_masks)
+        input_list.append(torch.tensor(tokens, dtype=torch.int64))
+        mask_list.append(torch.ones(len(tokens), dtype=torch.int64))
     
-    return \
-        torch.tensor(input_ids, dtype=torch.int64), \
-        torch.tensor(attention_masks, dtype=torch.int64)
+    input_ids = pad_sequence(input_list, batch_first=True)
+    attention_masks = pad_sequence(mask_list, batch_first=True)
+    
+    return input_ids, attention_masks
 
 
 def load_image(filename, resolution):
@@ -50,17 +47,12 @@ def load_image(filename, resolution):
     return img_tensor
 
 
-def extract_patches(img_tensor, patch_width):
-    C, H, W = img_tensor.shape
-
-    # default image resolution is 224 * 224, patch width is 16
-    patches = img_tensor.reshape(
-        C,
-        H // patch_width, patch_width,
-        W // patch_width, patch_width
-    ) # [3, 14, 16, 14, 16]
-
-    patches = patches.permute(1, 3, 0, 2, 4) # [14, 14, 3, 16, 16]
-
-    # [14 * 14, 3 * 16 * 16]
-    return patches.reshape(-1, 3 * patch_width * patch_width)
+def strip_state_prefix(state_dict, prefix="_orig_mod.module."):
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith(prefix):
+            new_key = k[len(prefix):]
+        else:
+            new_key = k
+        new_state_dict[new_key] = v
+    return new_state_dict

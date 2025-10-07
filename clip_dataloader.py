@@ -33,16 +33,24 @@ def create_dataloader(shard_pattern, batch_size):
     ])
 
     def caption_transform(json_data):
+        if not json_data['caption']:
+            return []
+
         caption = json_data['caption']
         tokens = tokenize(caption)
         return tokens
 
     def filter_sample(sample):
         _, caption_token = sample
-        return len(caption_token) < TEXT_LENGTH_LIMIT
+        return len(caption_token) < TEXT_LENGTH_LIMIT and len(caption_token) > 1
 
+    splitter_func = wds.split_by_node if dist.is_initialized() else wds.single_node_only
     dataset = (
-        wds.WebDataset(shard_pattern, resampled=True, shardshuffle=True)
+        wds.WebDataset(
+            shard_pattern,
+            nodesplitter = splitter_func,
+            resampled = True,
+            shardshuffle = True)
         .shuffle(1000)  # sample-level shuffle buffer
         .decode("pil")  # decode jpg->PIL
         .to_tuple("jpg", "json")
@@ -51,9 +59,9 @@ def create_dataloader(shard_pattern, batch_size):
         .batched(batch_size)
     )
 
-    # shard dataset across ranks
-    if dist.is_initialized():
-        dataset = dataset.shard(dist.get_world_size(), dist.get_rank())
+    # To know which data shard we are fetching from, we can do:
+    #   dataset = wds.WebDataset(url).to_tuple("jpg", "json", "__url__")
+    #   img, json_data, url = next(iter(dataset))
 
     loader = torch.utils.data.DataLoader(
         dataset,
