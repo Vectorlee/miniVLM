@@ -4,9 +4,10 @@ from torch.nn.utils.rnn import pad_sequence
 import tiktoken
 import torch
 import torch.distributed as dist
+import glob
 
-TRAIN_DATA_PATTERN = "clip_data/training_data/{00000..11499}.tar"
-VAL_DATA_PATTERN = "clip_data/validation_data/{00000..0031}.tar"
+TRAIN_DATA_PATTERN = "clip_data/training_data/*.tar"
+VAL_DATA_PATTERN = "clip_data/validation_data/*.tar"
 
 TEXT_LENGTH_LIMIT = 128
 
@@ -22,6 +23,9 @@ def tokenize(text):
 
 
 def create_dataloader(shard_pattern, batch_size):
+    shard_urls = sorted(glob.glob(shard_pattern))
+    print(f"creating dataloader, shard_pattern: {shard_pattern}, shard_count: {len(shard_urls)}")
+    assert len(shard_urls) > 0
 
     image_transform = transforms.Compose([
         # the image has already been resize by img2dataset
@@ -47,7 +51,7 @@ def create_dataloader(shard_pattern, batch_size):
     splitter_func = wds.split_by_node if dist.is_initialized() else wds.single_node_only
     dataset = (
         wds.WebDataset(
-            shard_pattern,
+            shard_urls,
             nodesplitter = splitter_func,
             resampled = True,
             shardshuffle = True)
