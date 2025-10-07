@@ -5,7 +5,7 @@ import math
 import time
 import random
 from clip_dataloader import DataLoaderLite
-from clip_model import CLIPModel, CLIPConfig
+from clip_model import CLIPModel, CLIPConfig, clip_loss
 
 import torch.distributed as dist
 from torch.distributed import init_process_group, destroy_process_group
@@ -36,6 +36,7 @@ class CLIPTrainingParam:
     
     max_steps = 1800
     warmup_steps = 600
+    val_steps = 10
     adam_beta1 = 0.9
     adam_beta2 = 0.98
     adam_eps = 1e-6
@@ -149,6 +150,14 @@ def load_clip_model(train_config: CLIPTrainingParam):
     return model, optimizer
 
 
+# Gathers tensors from all ranks and supports gradient backprop.
+def all_gather_with_grad(tensor):
+    world_size = dist.get_world_size()
+    tensors_gather = [torch.zeros_like(tensor) for _ in range(world_size)]
+    dist.all_gather(tensors_gather, tensor)
+    return torch.cat(tensors_gather, dim=0)
+
+
 # ------------ Main Training Code ---------------
 
 train_param = CLIPTrainingParam()
@@ -208,20 +217,20 @@ for step in range(train_param.max_steps):
         val_loader.reset()
         with torch.no_grad():
             val_loss_accum = 0.0
-            # need to be smaller than 100M val tokens / (B * T * world_size)
-            # roughly processing 10M tokens for validation
-            val_loss_steps = 40 
-            for _ in range(val_loss_steps):
+            for _ in range(train_param.val_steps):
                 text, mask, img = val_loader.next_batch()
                 text, mask, img = text.to(train_param.device), mask.to(train_param.device), img.to(train_param.device)
 
                 with torch.autocast(device_type=train_param.device, dtype=torch.bfloat16):
-                    logit, loss = model(input_ids = text, attention_masks = mask, img_tensor = img)
-                loss = loss / val_loss_steps
-                val_loss_accum += loss.detach()
-        
-        if train_param.ddp:
-            dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
+                    text_embds, vision_embds, scaler = model(input_ids = text, attention_masks = mask, img_tensor = img)
+                    # get embeddings from other GPUs
+                    global_text_embds = all_gather_with_grad(text_embds)
+                    global_vision_embds = all_gather_with_grad(vision_embds)
+
+                    loss = clip_loss(global_text_embds, global_vision_embds, scaler)
+                
+                val_loss_accum += loss.detach() / train_param.val_steps
+
         if train_param.master_process:
             print(f"Validation loss: {val_loss_accum.item():.6f}")
             with open(log_file, 'a') as f:
@@ -238,26 +247,14 @@ for step in range(train_param.max_steps):
 
         # mixed precision training
         with torch.autocast(device_type=train_param.device, dtype=torch.bfloat16):
-            not_last_microstep = micro_step < train_param.grad_accum_steps - 1
+            text_embds, vision_embds, scaler = model(input_ids = text, attention_masks = mask, img_tensor = img)
 
-            if train_param.ddp and not_last_microstep:
-                with model.no_sync():
-                    # no_sync context requires the forward pass also resides in the context
-                    logits, loss = model(input_ids = text, attention_masks = mask, img_tensor = img)
-
-                    # the micro batch lost the normalizer
-                    # so we divide the loss by the number of micro step count
-                    loss = loss / train_param.grad_accum_steps
-                    loss_accum += loss.detach()
-                    # because we didn't zero the grad, the gradient will accumulate
-                    loss.backward()
-            else:
-                # without the no_sync context manager here
-                logits, loss = model(input_ids = text, attention_masks = mask, img_tensor = img)
-                loss = loss / train_param.grad_accum_steps
-                loss_accum += loss.detach()
-                # For the ddp case, the gradients will be synchronized across devices
-                loss.backward()
+            # get embeddings from other GPUs
+            global_text_embds = all_gather_with_grad(text_embds)
+            global_vision_embds = all_gather_with_grad(vision_embds)
+            
+            loss = clip_loss(global_text_embds, global_vision_embds, scaler)
+            loss.backward()
 
     if train_param.ddp:
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)

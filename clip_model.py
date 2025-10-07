@@ -14,6 +14,19 @@ class CLIPConfig:
     hidden_dim: int = 512
 
 
+def clip_loss(text_embds, vision_embds, scaler):
+    B, C = text_embds.shape
+
+    logits = vision_embds @ text_embds.transpose(0, 1) * scaler
+
+    labels = torch.arange(B, device=text_embds.device)
+    loss_i = F.cross_entropy(logits, labels)
+    loss_t = F.cross_entropy(logits.transpose(0, 1), labels)
+    
+    loss = (loss_i + loss_t) / 2
+    return loss
+
+
 class CLIPModel(nn.Module):
 
     def __init__(self, config):
@@ -44,20 +57,20 @@ class CLIPModel(nn.Module):
         # the first class embedding
         vision_encodings = img_embds[torch.arange(B2, device=img_embds.device), 0] # [B2, C2]
 
+        # [B, hidden_dim]
         text_projs = F.normalize(self.text_proj(text_encodings), p=2.0, dim=1)
         vision_projs = F.normalize(self.vision_proj(vision_encodings), p=2.0, dim=1)
 
         # make sure the scaler does not exceed 100
         scaler = torch.clamp(torch.exp(self.temperature), max=100)
-        # [B1, hidden_dim] @ [hidden_dim, B2]
-        logits = vision_projs @ text_projs.transpose(0, 1) * scaler
+        
+        # logits = vision_projs @ text_projs.transpose(0, 1) * scaler
+        # labels = torch.arange(B1, device=img_tensor.device)
+        # loss_i = F.cross_entropy(logits, labels)
+        # loss_t = F.cross_entropy(logits.transpose(0, 1), labels)
+        # loss = (loss_i + loss_t) / 2
 
-        labels = torch.arange(B1, device=img_tensor.device)
-        loss_i = F.cross_entropy(logits, labels)
-        loss_t = F.cross_entropy(logits.transpose(0, 1), labels)
-
-        loss = (loss_i + loss_t) / 2
-        return logits, loss
+        return text_projs, vision_projs, scaler
 
 
 
