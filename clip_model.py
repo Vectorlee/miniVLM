@@ -7,13 +7,6 @@ from vision_transformer import VisionTransformer, VisionTransformerConfig
 from text_encoder import TextEncoder, TextEncoderConfig
 
 
-@dataclass
-class CLIPConfig:
-    text_config: TextEncoderConfig = TextEncoderConfig()
-    vision_config: VisionTransformerConfig = VisionTransformerConfig()
-    hidden_dim: int = 512
-
-
 def clip_loss(text_embds, vision_embds, scaler):
     B, C = text_embds.shape
 
@@ -22,22 +15,21 @@ def clip_loss(text_embds, vision_embds, scaler):
     labels = torch.arange(B, device=text_embds.device)
     loss_i = F.cross_entropy(logits, labels)
     loss_t = F.cross_entropy(logits.transpose(0, 1), labels)
-    
+
     loss = (loss_i + loss_t) / 2
     return loss
 
 
 class CLIPModel(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, text_config: TextEncoderConfig, vision_config: VisionTransformerConfig, hidden_dim=512):
         super().__init__()
-        self.config = config
 
-        self.text_encoder = TextEncoder(config.text_config)
-        self.vision_encoder = VisionTransformer(config.vision_config)
+        self.text_encoder = TextEncoder(text_config)
+        self.vision_encoder = VisionTransformer(vision_config)
 
-        self.text_proj = nn.Linear(config.text_config.n_embd, config.hidden_dim)
-        self.vision_proj = nn.Linear(config.vision_config.n_embd, config.hidden_dim)
+        self.text_proj = nn.Linear(text_config.n_embd, hidden_dim)
+        self.vision_proj = nn.Linear(vision_config.n_embd, hidden_dim)
 
         # initialize the temperature as 0.07
         self.temperature = nn.Parameter(torch.tensor([0.07], dtype=torch.float32))

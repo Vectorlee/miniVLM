@@ -5,7 +5,9 @@ import math
 import time
 import random
 from clip_dataloader import DataLoaderLite
-from clip_model import CLIPModel, CLIPConfig, clip_loss
+from clip_model import CLIPModel, clip_loss
+from vision_transformer import VisionTransformerConfig
+from text_encoder import TextEncoderConfig
 
 import torch.distributed as dist
 from torch.distributed import init_process_group, destroy_process_group
@@ -21,6 +23,9 @@ if torch.cuda.is_available():
 
 @dataclass
 class CLIPTrainingParam:
+    # clip hyper parameter
+    hidden_dim = 512
+
     # distributed data parallel parameters
     ddp_enabled: bool = False
     ddp_rank: int = 0
@@ -130,7 +135,11 @@ def configure_optimizers(model, train_config: CLIPTrainingParam):
 
 
 def load_clip_model(train_config: CLIPTrainingParam):
-    model = CLIPModel(CLIPConfig())
+    model = CLIPModel(
+        text_config = TextEncoderConfig(),
+        vision_config = VisionTransformerConfig(),
+        hidden_dim = train_config.hidden_dim
+    )
 
     # Recommended order: 
     #   1. Move the model to the target device
