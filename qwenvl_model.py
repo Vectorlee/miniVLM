@@ -4,21 +4,26 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from vision_transformer import VisionTransformer, VisionTransformerConfig
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-LLM_MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
+LLM_MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
+
+qwen_tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL_NAME)
+im_start = qwen_tokenizer("<|im_start|>").input_ids[0]
+im_end = qwen_tokenizer("<|im_end|>").input_ids[0]
 
 
 @dataclass
 class QwenVLConfig:
     query_size: int = 196
     vision_embd: int = 768
-    text_embd: int = 3584   # qwen2.5-7b
-    n_head: int = 12
+    text_embd: int = 2048   # qwen2.5-3b
+    n_head: int = 8
 
 class VLAdaptor(nn.Module):
 
     def __init__(self, config):
+        super().__init__()
         self.config = config
 
         self.query = nn.Parameter(torch.randn(config.query_size, config.vision_embd))
@@ -43,7 +48,7 @@ class VLAdaptor(nn.Module):
         # [B, T, d_v], d_v = text_embed
         v = self.value_proj(vision_features)
         # [B, n_head, T, d_v // head]
-        v = k.view(B, T, self.config.n_head, -1).transpose(1, 2)
+        v = v.view(B, T, self.config.n_head, -1).transpose(1, 2)
         
         # query: [_, n_head, Q, d_q //n_head], kT: [B, n_head, d_k // n_head, T], broadcasting here
         # cross attention: [B, n_head, Q, T]
@@ -61,32 +66,50 @@ class VLAdaptor(nn.Module):
 class QwenVL(nn.Module):
 
     def __init__(self, config):
+        super().__init__()
         self.config = config
 
         self.vision_encoder = VisionTransformer(VisionTransformerConfig())
         self.llm_backbone = AutoModelForCausalLM.from_pretrained(LLM_MODEL_NAME)
         self.adapter = VLAdaptor(config)
 
+    def freeze_llm_backbone(self):
+        for param in self.llm_backbone.parameters():
+            param.requires_grad = False
+        return 
 
-    def forward(self, input_ids, attention_masks, patches, labels=None):
+    def freeze_vision_encoder(self):
+        for param in self.vision_encoder.parameters():
+            param.requires_grad = False
+        return
+
+
+    def forward(self, input_ids, attention_masks, img_tensor, labels=None):
+        B, T = input_ids.shape
+
         # text imbeddings [B, T, C]
         text_embds = self.llm_backbone.model.embed_tokens(input_ids)
 
+        # [B, 1, C]
+        im_start_embds = self.llm_backbone.model.embed_tokens([im_start]).expand(B, 1, -1)
+        im_end_embds = self.llm_backbone.model.embed_tokens([im_end]).expand(B, 1, -1)
+
         # vision embeddings [B, K + 1, P]
-        vision_embds = self.vision_encoder(patches)
+        vision_embds = self.vision_encoder(img_tensor)
 
         # remove the first cls embedding
         B, K, P = vision_embds.shape
-        vision_embds = vision_embds[torch.arange(B, device=patches.device), 1:K] # [B, K, P]
+        vision_embds = vision_embds[torch.arange(B, device=img_tensor.device), 1:K] # [B, K, P]
 
         # project to llm embedding space [B, Q, C]
         proj_embds = self.adapter(vision_embds)
         
-        # add the image embeddings to the front [B, K + T, C]
-        input_embds = torch.cat((proj_embds, text_embds), dim=1)
+        # add the image embeddings to the front [B, 2 + K + T, C]
+        # <|im_start|>img embeddings<|im_end|>
+        input_embds = torch.cat((im_start_embds, proj_embds, im_end_embds, text_embds), dim=1)
 
         # add image masks
-        img_mask = torch.ones(B, K - 1, dtype=attention_masks.dtype, device=attention_masks.device)
+        img_mask = torch.ones(B, K + 1, dtype=attention_masks.dtype, device=attention_masks.device)
         input_masks = torch.cat((img_mask, attention_masks), dim=1)
 
         output = self.llm_backbone(inputs_embeds=input_embds, attention_mask=input_masks, labels=labels)

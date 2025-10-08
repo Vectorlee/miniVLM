@@ -1,26 +1,17 @@
 import webdataset as wds
 from torchvision import transforms
-from torch.nn.utils.rnn import pad_sequence
 import tiktoken
 import torch
 import torch.distributed as dist
 import glob
 
+from util import get_padding_batch_input, gpt_tokenize
+
+
 TRAIN_DATA_PATTERN = "clip_data/training_data/*.tar"
 VAL_DATA_PATTERN = "clip_data/validation_data/*.tar"
 
 TEXT_LENGTH_LIMIT = 128
-
-#initilize tokenizer
-enc = tiktoken.get_encoding("gpt2")
-eot = enc._special_tokens['<|endoftext|>']
-
-def tokenize(text):
-    tokens = []
-    tokens.extend(enc.encode_ordinary(text))
-    tokens.append(eot)
-    return tokens
-
 
 def create_dataloader(shard_pattern, batch_size):
     shard_urls = sorted(glob.glob(shard_pattern))
@@ -41,7 +32,7 @@ def create_dataloader(shard_pattern, batch_size):
             return []
 
         caption = json_data['caption']
-        tokens = tokenize(caption)
+        tokens = gpt_tokenize(caption)
         return tokens
 
     def filter_sample(sample):
@@ -74,20 +65,6 @@ def create_dataloader(shard_pattern, batch_size):
     )
 
     return loader
-
-
-def get_padding_batch_input(token_batch):
-    input_list = []
-    mask_list = []
-
-    for tokens in token_batch:
-        input_list.append(torch.tensor(tokens, dtype=torch.int64))
-        mask_list.append(torch.ones(len(tokens), dtype=torch.int64))
-    
-    input_ids = pad_sequence(input_list, batch_first=True)
-    attention_masks = pad_sequence(mask_list, batch_first=True)
-    
-    return input_ids, attention_masks
 
 
 class DataLoaderLite:

@@ -15,17 +15,27 @@ class LLaVA(nn.Module):
         self.vision_encoder = VisionTransformer(VisionTransformerConfig())
         self.llm_backbone = AutoModelForCausalLM.from_pretrained(LLM_MODEL_NAME)
         self.adapter = nn.Linear(self.vision_encoder.config.n_embd, self.llm_backbone.config.hidden_size)
+
+    def freeze_llm_backbone(self):
+        for param in self.llm_backbone.parameters():
+            param.requires_grad = False
+        return 
+
+    def freeze_vision_encoder(self):
+        for param in self.vision_encoder.parameters():
+            param.requires_grad = False
+        return
     
-    def forward(self, input_ids, attention_masks, patches, labels=None):
+    def forward(self, input_ids, attention_masks, img_tensor, labels=None):
         # text imbeddings [B, T, C]
         text_embds = self.llm_backbone.model.embed_tokens(input_ids)
 
         # vision embeddings [B, K + 1, P]
-        vision_embds = self.vision_encoder(patches)
+        vision_embds = self.vision_encoder(img_tensor)
 
         # remove the first cls embedding
         B, K, P = vision_embds.shape
-        vision_embds = vision_embds[torch.arange(B, device=patches.device), 1:K] # [B, K, P]
+        vision_embds = vision_embds[torch.arange(B, device=img_tensor.device), 1:K] # [B, K, P]
 
         # project to llm embedding space [B, K, C]
         proj_embds = self.adapter(vision_embds)

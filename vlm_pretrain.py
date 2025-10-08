@@ -1,19 +1,17 @@
 from dataclasses import dataclass
 import os
 import torch
-import math
 import time
 import random
-from clip_dataloader import DataLoaderLite
-from clip_model import CLIPModel, clip_loss
-from vision_transformer import VisionTransformerConfig
-from text_encoder import TextEncoderConfig
+from qwenvl_model import QwenVLConfig, QwenVL
+from vlm_dataloader import DataLoaderLite
 
 import torch.distributed as dist
 from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 from training_config import TrainingParam
 from util import configure_optimizers, get_lr, config_ddp
+
 
 # set the random seed to ensure reproducibility
 random.seed(1337)
@@ -22,14 +20,10 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
 
-def load_clip_model(train_config: TrainingParam):
-    clip_model_hidden_size = 512
-
-    model = CLIPModel(
-        text_config = TextEncoderConfig(),
-        vision_config = VisionTransformerConfig(),
-        hidden_dim = clip_model_hidden_size
-    )
+def load_qwenvl_model(train_config: TrainingParam):
+    model = QwenVL(QwenVLConfig())
+    # freeze the llm backbone, prevent it from training
+    model.freeze_llm_backbone()
 
     # Recommended order: 
     #   1. Move the model to the target device
@@ -49,23 +43,21 @@ def load_clip_model(train_config: TrainingParam):
     return model, optimizer
 
 
-# Gathers tensors from all ranks and supports gradient backprop.
-def all_gather_with_grad(tensor):
-    if not dist.is_initialized():
-        return tensor
-
-    world_size = dist.get_world_size()
-    tensors_gather = [torch.zeros_like(tensor) for _ in range(world_size)]
-    dist.all_gather(tensors_gather, tensor)
-
-    # ensure local copy is preserved for autograd
-    tensors_gather[dist.get_rank()] = tensor
-    return torch.cat(tensors_gather, dim=0)
-
 
 # ------------ Main Training Code ---------------
 
-train_param = TrainingParam()
+train_param = TrainingParam(
+    max_lr = 2e-4,
+    min_lr = 2e-5,
+    num_epoch = 32,
+    
+    max_steps = 6000,
+    warmup_steps = 1000,
+
+    total_batch_size = 8196, # 2**13
+    micro_batch_size = 32,  # micro batch size
+    grad_accum_steps = 32
+)
 
 # config DDP settings
 train_param = config_ddp(train_param)
@@ -79,7 +71,7 @@ torch.cuda.set_device(train_param.device)
 torch.set_float32_matmul_precision('high')
 
 # load model
-model, optimizer = load_clip_model(train_param)
+model, optimizer = load_qwenvl_model(train_param)
 
 # set up logging
 log_dir = "log"
@@ -103,31 +95,30 @@ val_loader = DataLoaderLite(
 )
 
 # training loop
-for step in range(train_param.max_steps):
+total_train_steps = train_param.max_steps * train_param.num_epoch
+print("ftotal training steps: {total_train_steps}")
+
+for step in range(total_train_steps):
     t0 = time.time()
 
     # checkpoint model
-    if step % 3000 == 0 or step == train_param.max_steps - 1:
+    if step % 500 == 0 or step == total_train_steps - 1:
         if train_param.master_process:
             torch.save(model.state_dict(), os.path.join(model_dir, f"model_{step}.pth"))
 
     # validation loop
-    if step % 500 == 0 or step == train_param.max_steps - 1:
+    if step % 200 == 0 or step == total_train_steps - 1:
         model.eval()
         
         with torch.no_grad():
             val_loss_accum = 0.0
             for _ in range(train_param.val_steps):
-                text, mask, img = val_loader.next_batch()
-                text, mask, img = text.to(train_param.device), mask.to(train_param.device), img.to(train_param.device)
+                text, mask, img, labels = val_loader.next_batch()
+                text, mask, img, labels = \
+                    text.to(train_param.device), mask.to(train_param.device), img.to(train_param.device), labels.to(train_param.device)
 
                 with torch.autocast(device_type=train_param.device, dtype=torch.bfloat16):
-                    text_embds, vision_embds, scaler = model(input_ids = text, attention_masks = mask, img_tensor = img)
-                    # get embeddings from other GPUs
-                    global_text_embds = all_gather_with_grad(text_embds)
-                    global_vision_embds = all_gather_with_grad(vision_embds)
-
-                    loss = clip_loss(global_text_embds, global_vision_embds, scaler)
+                    logits, loss = model(input_ids=text, attention_masks=mask, img_tensor=img, labels=labels)
                 
                 val_loss_accum += loss.detach() / train_param.val_steps
 
@@ -139,20 +130,38 @@ for step in range(train_param.max_steps):
     # training loop
     model.train()
     optimizer.zero_grad()
+    loss_accum = 0.0
 
-    text, mask, img = train_loader.next_batch()
-    text, mask, img = text.to(train_param.device), mask.to(train_param.device), img.to(train_param.device)
+    for micro_step in range(train_param.grad_accum_steps):
+        text, mask, img, labels = train_loader.next_batch()
+        text, mask, img, labels = \
+            text.to(train_param.device), mask.to(train_param.device), img.to(train_param.device), labels.to(train_param.device)
 
-    # mixed precision training
-    with torch.autocast(device_type=train_param.device, dtype=torch.bfloat16):
-        text_embds, vision_embds, scaler = model(input_ids = text, attention_masks = mask, img_tensor = img)
+        # mixed precision training
+        with torch.autocast(device_type=train_param.device, dtype=torch.bfloat16):
+            not_last_microstep = micro_step < train_param.grad_accum_steps - 1
 
-        # get embeddings from other GPUs
-        global_text_embds = all_gather_with_grad(text_embds)
-        global_vision_embds = all_gather_with_grad(vision_embds)
-            
-        loss = clip_loss(global_text_embds, global_vision_embds, scaler)
-        loss.backward()
+            if train_param.ddp_enabled and not_last_microstep:
+                with model.no_sync():
+                    # no_sync context requires the forward pass also resides in the context
+                    logits, loss = model(input_ids=text, attention_masks=mask, img_tensor=img, labels=labels)
+
+                    # the micro batch lost the normalizer
+                    # so we divide the loss by the number of micro step count
+                    loss = loss / train_param.grad_accum_steps
+                    loss_accum += loss.detach()
+                    # because we didn't zero the grad, the gradient will accumulate
+                    loss.backward()
+            else:
+                # without the no_sync context manager here
+                ogits, loss = model(input_ids=text, attention_masks=mask, img_tensor=img, labels=labels)
+                loss = loss / train_param.grad_accum_steps
+                loss_accum += loss.detach()
+                # For the ddp case, the gradients will be synchronized across devices
+                loss.backward()
+
+    if train_param.ddp_enabled:
+        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
 
     # Gradient Clipping
     # Before the optimizer.step, but after the loss.backward()
@@ -168,9 +177,9 @@ for step in range(train_param.max_steps):
     t1 = time.time()
     dt = (t1 - t0)
     if train_param.master_process:
-        print(f"step {step}, loss: {loss.item():.6f}, dt: {dt * 1000:.2f}ms, norm: {norm:.4f}, lr: {lr:e}")
+        print(f"step {step}, loss: {loss_accum.item():.6f}, dt: {dt * 1000:.2f}ms, norm: {norm:.4f}, lr: {lr:e}")
         with open(log_file, 'a') as f:
-            f.write(f"{step} train {loss.item():.6f}\n")
+            f.write(f"{step} train {loss_accum.item():.6f}\n")
 
 
 if train_param.ddp_enabled:
