@@ -91,26 +91,31 @@ class QwenVL(nn.Module):
         text_embds = self.llm_backbone.model.embed_tokens(input_ids)
 
         # [B, 1, C]
-        im_start_embds = self.llm_backbone.model.embed_tokens([im_start]).expand(B, 1, -1)
-        im_end_embds = self.llm_backbone.model.embed_tokens([im_end]).expand(B, 1, -1)
+        im_start_embds = self.llm_backbone.model.embed_tokens(torch.tensor([im_start])).expand(B, 1, -1)
+        im_end_embds = self.llm_backbone.model.embed_tokens(torch.tensor([im_end])).expand(B, 1, -1)
 
         # vision embeddings [B, K + 1, P]
         vision_embds = self.vision_encoder(img_tensor)
 
         # remove the first cls embedding
-        B, K, P = vision_embds.shape
+        _, K, _ = vision_embds.shape
         vision_embds = vision_embds[torch.arange(B, device=img_tensor.device), 1:K] # [B, K, P]
 
         # project to llm embedding space [B, Q, C]
         proj_embds = self.adapter(vision_embds)
+        _, Q, _ = proj_embds.shape
         
-        # add the image embeddings to the front [B, 2 + K + T, C]
+        # add the image embeddings to the front [B, 2 + Q + T, C]
         # <|im_start|>img embeddings<|im_end|>
         input_embds = torch.cat((im_start_embds, proj_embds, im_end_embds, text_embds), dim=1)
 
         # add image masks
-        img_mask = torch.ones(B, K + 1, dtype=attention_masks.dtype, device=attention_masks.device)
+        img_mask = torch.ones(B, Q + 2, dtype=attention_masks.dtype, device=attention_masks.device)
         input_masks = torch.cat((img_mask, attention_masks), dim=1)
 
-        output = self.llm_backbone(inputs_embeds=input_embds, attention_mask=input_masks, labels=labels)
+        # add extra negative labels
+        extra_labels = torch.zeros(B, Q + 2, dtype=labels.dtype, device=labels.device).fill_(-100)
+        output_labels = torch.cat((extra_labels, labels), dim=1)
+
+        output = self.llm_backbone(inputs_embeds=input_embds, attention_mask=input_masks, labels=output_labels)
         return output.logits, output.loss
