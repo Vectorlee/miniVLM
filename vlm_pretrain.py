@@ -104,7 +104,8 @@ for step in range(total_train_steps):
     # checkpoint model
     if step % 500 == 0 or step == total_train_steps - 1:
         if train_param.master_process:
-            torch.save(model.state_dict(), os.path.join(model_dir, f"model_{step}.pth"))
+            torch.save(model.vision_encoder.state_dict(), os.path.join(model_dir, f"vlm_vit_{step}.pth"))
+            torch.save(model.adapter.state_dict(), os.path.join(model_dir, f"vlm_adapter_{step}.pth"))
 
     # validation loop
     if step % 200 == 0 or step == total_train_steps - 1:

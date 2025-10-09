@@ -82,6 +82,7 @@ def create_dataloader(shard_pattern, batch_size):
         wds.WebDataset(
             shard_urls,
             nodesplitter = splitter_func,
+            handler = wds.ignore_and_continue,
             resampled = True,
             shardshuffle = True)
         .shuffle(1000)  # sample-level shuffle buffer
