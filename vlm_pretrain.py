@@ -21,7 +21,11 @@ if torch.cuda.is_available():
 
 
 def load_qwenvl_model(train_config: TrainingParam):
+    clip_model_file = "./clip_data/clip_pretrain.pth"
+
     model = QwenVL(QwenVLConfig())
+    # load the pretrained vision_encoder
+    model.init_vision_encoder(clip_model_file)
     # freeze the llm backbone, prevent it from pre-training
     model.freeze_llm_backbone()
 

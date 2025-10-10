@@ -6,6 +6,8 @@ import torch.nn.functional as F
 from vision_transformer import VisionTransformer, VisionTransformerConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from util import strip_state_prefix
+
 LLM_MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
 
 qwen_tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL_NAME)
@@ -72,6 +74,16 @@ class QwenVL(nn.Module):
         self.vision_encoder = VisionTransformer(VisionTransformerConfig())
         self.llm_backbone = AutoModelForCausalLM.from_pretrained(LLM_MODEL_NAME)
         self.adapter = VLAdaptor(config)
+
+    
+    def init_vision_encoder(self, clip_model_file):
+        vit_prefix = "vision_encoder."
+
+        with torch.no_grad():
+            state_dict = strip_state_prefix(torch.load(clip_model_file))
+            sub_dict = {k.replace(vit_prefix, ""): v for k, v in state_dict.items() if k.startswith(vit_prefix)}
+            self.vision_encoder.load_state_dict(sub_dict)
+        return
 
     def freeze_llm_backbone(self):
         for param in self.llm_backbone.parameters():
