@@ -22,21 +22,17 @@ if torch.cuda.is_available():
 
 def load_qwenvl_model(train_config: TrainingParam):
     model = QwenVL(QwenVLConfig())
-    # freeze the llm backbone, prevent it from training
+    # freeze the llm backbone, prevent it from pre-training
     model.freeze_llm_backbone()
 
-    # Recommended order: 
-    #   1. Move the model to the target device
-    #   2. Wrap the model in ddp with the correct local rank id
-    #   3. Compile the model
-    #   4. Create the optimizer object
     model = model.to(train_config.device)
 
-    if train_config.ddp_enabled:
-        model = DDP(model, device_ids=[train_config.ddp_local_rank])
-
     # compile the model, for kernel fuse
-    model = torch.compile(model)
+    model.adapter = torch.compile(model.adapter)
+    model.vision_encoder = torch.compile(model.vision_encoder)
+
+    if train_config.ddp_enabled:
+        model = DDP(model, device_ids=[train_config.ddp_local_rank])    
 
     optimizer = configure_optimizers(model, train_config)
 
@@ -55,8 +51,8 @@ train_param = TrainingParam(
     warmup_steps = 1000,
 
     total_batch_size = 8196, # 2**13
-    micro_batch_size = 32,  # micro batch size
-    grad_accum_steps = 32
+    micro_batch_size = 128,  # micro batch size
+    grad_accum_steps = 4
 )
 
 # config DDP settings
@@ -94,21 +90,20 @@ val_loader = DataLoaderLite(
     split = 'val'
 )
 
-# training loop
-total_train_steps = train_param.max_steps * train_param.num_epoch
-print("ftotal training steps: {total_train_steps}")
+real_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
 
-for step in range(total_train_steps):
+# training loop
+for step in range(train_param.max_steps):
     t0 = time.time()
 
     # checkpoint model
-    if step % 500 == 0 or step == total_train_steps - 1:
+    if step % 500 == 0 or step == train_param.max_steps - 1:
         if train_param.master_process:
-            torch.save(model.vision_encoder.state_dict(), os.path.join(model_dir, f"vlm_vit_{step}.pth"))
-            torch.save(model.adapter.state_dict(), os.path.join(model_dir, f"vlm_adapter_{step}.pth"))
+            torch.save(real_model.vision_encoder.state_dict(), os.path.join(model_dir, f"vlm_vit_{step}.pth"))
+            torch.save(real_model.adapter.state_dict(), os.path.join(model_dir, f"vlm_adapter_{step}.pth"))
 
     # validation loop
-    if step % 200 == 0 or step == total_train_steps - 1:
+    if step % 200 == 0 or step == train_param.max_steps - 1:
         model.eval()
         
         with torch.no_grad():

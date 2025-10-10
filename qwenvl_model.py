@@ -91,8 +91,8 @@ class QwenVL(nn.Module):
         text_embds = self.llm_backbone.model.embed_tokens(input_ids)
 
         # [B, 1, C]
-        im_start_embds = self.llm_backbone.model.embed_tokens(torch.tensor([im_start])).expand(B, 1, -1)
-        im_end_embds = self.llm_backbone.model.embed_tokens(torch.tensor([im_end])).expand(B, 1, -1)
+        im_start_embds = self.llm_backbone.model.embed_tokens(torch.tensor([im_start], device=img_tensor.device)).expand(B, 1, -1)
+        im_end_embds = self.llm_backbone.model.embed_tokens(torch.tensor([im_end]), device=img_tensor.device).expand(B, 1, -1)
 
         # vision embeddings [B, K + 1, P]
         vision_embds = self.vision_encoder(img_tensor)
