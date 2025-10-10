@@ -25,13 +25,12 @@ model.eval()
 model = model.to(device)
 
 def test_model(test_dataset, test_model, device):
-    dataloader = DataLoader(test_dataset, batch_size=100, shuffle=True)
-
     class_names = test_dataset.classes
     text_prompts = [f"a photo of a {c}" for c in class_names]
     text_tokens = [gpt_tokenize(text) for text in text_prompts]
-    input_ids, attention_masks = get_padding_batch_input(text_tokens)
 
+    dataloader = DataLoader(test_dataset, batch_size=len(text_prompts), shuffle=True)
+    input_ids, attention_masks = get_padding_batch_input(text_tokens)
     input_ids, attention_masks = input_ids.to(device), attention_masks.to(device)
 
     correct = 0

@@ -45,7 +45,7 @@ def create_dataloader(shard_pattern, batch_size):
 
     def caption_transform(json_data):
         if not json_data['caption'] or json_data['caption'] == "":
-            return []
+            return ([], [], [])
         
         caption = json_data['caption']
         prompt = random.choice(image_description_prompts)

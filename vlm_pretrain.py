@@ -31,7 +31,9 @@ def load_qwenvl_model(train_config: TrainingParam):
 
     model = model.to(train_config.device)
 
-    # compile the model, for kernel fuse
+    # compile only the sub model
+    # compile the whole model causes PyTorch’s symbolic shape system error
+    # torch/utils/_sympy/interp.py:176] [4/1] failed while executing pow_by_natural([VR[200, 16383], VR[-1, -1]])
     model.adapter = torch.compile(model.adapter)
     model.vision_encoder = torch.compile(model.vision_encoder)
 
@@ -55,7 +57,7 @@ train_param = TrainingParam(
     warmup_steps = 1000,
 
     total_batch_size = 8196, # 2**13
-    micro_batch_size = 128,  # micro batch size
+    micro_batch_size = 32,  # micro batch size
     grad_accum_steps = 4
 )
 
