@@ -5,6 +5,7 @@ import os
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+from tqdm import tqdm
 
 from qwenvl_model import QwenVLConfig, QwenVL, qwen_tokenizer
 from util import get_padding_batch_input, load_image
@@ -50,7 +51,7 @@ def process_sft_data(json_list):
     """
     batch_data = []
 
-    for element in json_list:
+    for element in tqdm(json_list):
         image_id = element["image_id"]
         image_file = f"{IMAGE_DIR}/{image_id}.jpg"
 
@@ -123,7 +124,7 @@ class SVITDataset(Dataset):
         return len(self.data_list) // self.batch_size
 
     def __getitem__(self, idx):
-        batch_data = self.data_list[idx * self.batch_size, (idx + 1) * self.batch_size]
+        batch_data = self.data_list[idx * self.batch_size: (idx + 1) * self.batch_size]
         input_ids, attention_masks, image_batch_tensor, labels = convert_to_tensor(batch_data)
         return input_ids, attention_masks, image_batch_tensor, labels
 
@@ -143,9 +144,9 @@ class DataLoadeFinetune:
         self.train_data = _tmp_input[len(_tmp_input) // 10:]
         self.test_data = _tmp_input[:len(_tmp_input) // 10]
 
-        self.train_loader = DataLoader(SVITDataset(self.train_data, batch_size=None, worker=4, shuffle=True))
-        self.test_loader = DataLoader(SVITDataset(self.test_data, batch_size=None, worker=4, shuffle=True))
-        self.val_loader = DataLoader(SVITDataset(self.val_data, batch_size=None, worker=4, shuffle=True))
+        self.train_loader = DataLoader(SVITDataset(self.train_data, batch_size), batch_size=None, num_workers=4, shuffle=True)
+        self.test_loader = DataLoader(SVITDataset(self.test_data, batch_size), batch_size=None, num_workers=4, shuffle=True)
+        self.val_loader = DataLoader(SVITDataset(self.val_data, batch_size), batch_size=None, num_workers=4, shuffle=True)
 
         self.train_iter = iter(self.train_loader)
         self.test_iter = iter(self.test_loader)
