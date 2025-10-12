@@ -45,8 +45,8 @@ def generate(model, input_ids, attention_masks, img_tensor, temperature, max_ste
             next_tokens = torch.multinomial(probs, num_samples=1).squeeze()
         
         # assign the next token and attention mask
-        input_ids[torch.arange(B, device=input_ids.device), last_logit_indexes] = next_tokens
-        attention_masks[torch.arange(B, device=input_ids.device), last_logit_indexes] = 1
+        input_ids[torch.arange(B, device=input_ids.device), last_logit_indexes + 1] = next_tokens
+        attention_masks[torch.arange(B, device=input_ids.device), last_logit_indexes + 1] = 1
 
         # if we hit the endoftext token, mark it in the finish_mask 
         idxs = torch.nonzero(next_tokens == im_end, as_tuple=False).squeeze().tolist()
