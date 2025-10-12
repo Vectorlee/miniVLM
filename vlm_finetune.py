@@ -1,10 +1,10 @@
 import json
-import torch
-import torch.nn.functional as F
 import random
 import time
 import os
-from multiprocessing import Pool
+import torch
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
 
 from qwenvl_model import QwenVLConfig, QwenVL, qwen_tokenizer
 from util import get_padding_batch_input, load_image
@@ -28,7 +28,7 @@ IMAGE_RESOLUTION = 224
 
 
 
-def prepare_prompt_tokens(json_list):
+def process_sft_data(json_list):
     """
     'image_id': 306,
     'conversations': [
@@ -57,7 +57,6 @@ def prepare_prompt_tokens(json_list):
         if not os.path.isfile(image_file):
             # if the image file doesn't exist, skip entirely
             continue
-        image_tensor = load_image(image_file, IMAGE_RESOLUTION)
 
         for conversation in element["conversations"]:
             content = conversation["content"]
@@ -90,36 +89,14 @@ def prepare_prompt_tokens(json_list):
                     tokenize=True,
                     add_generation_prompt=False
                 )
-                batch_data.append((image_tensor, prompt_tokens, full_tokens))
+                batch_data.append((image_file, prompt_tokens, full_tokens))
     
     return batch_data
 
 
-def parallel_process_sft_data(sft_json_file):
-    total_data_list = []
-
-    # load the file
-    with open(sft_json_file) as pfile:
-        json_list = json.load(pfile)
-
-    chunk_list = [] 
-    chunk_size = len(json_list) // 600
-    for index in range(0, len(json_list), chunk_size):
-        part = json_list[index: index + chunk_size]
-        chunk_list.append(part)
-
-
-    worker_count = os.cpu_count()
-    with Pool(processes=worker_count) as pool:
-        for batch_data in pool.imap_unordered(prepare_prompt_tokens, chunk_list):
-            total_data_list.extend(batch_data)
-    
-    return total_data_list
-
-
 def convert_to_tensor(batch_data):
 
-    image_tensors   = [img_tensor for img_tensor, _, _ in batch_data]
+    image_files     = [img_file for img_file, _, _ in batch_data]
     input_tokens    = [full_tokens for _, _, full_tokens in batch_data]
     question_tokens = [prompt_tokens for _, prompt_tokens, _ in batch_data]
 
@@ -128,14 +105,32 @@ def convert_to_tensor(batch_data):
     for i in range(input_ids.shape[0]):
         labels[i, :len(question_tokens[i])] = -100
     
-    image_batch_tensor = torch.stack(image_tensors, dim=0)
+    image_tensor_list = []
+    for img_file in image_files:
+        image_tensor_list.append(load_image(img_file, IMAGE_RESOLUTION))
+
+    image_batch_tensor = torch.stack(image_tensor_list, dim=0)
 
     return input_ids, attention_masks, image_batch_tensor, labels
 
 
+class SVITDataset(Dataset):
+    def __init__(self, data_list, batch_size):
+        self.data_list = data_list
+        self.batch_size = batch_size
+
+    def __len__(self):
+        return len(self.data_list) // self.batch_size
+
+    def __getitem__(self, idx):
+        batch_data = self.data_list[idx * self.batch_size, (idx + 1) * self.batch_size]
+        input_ids, attention_masks, image_batch_tensor, labels = convert_to_tensor(batch_data)
+        return input_ids, attention_masks, image_batch_tensor, labels
+
+
 class DataLoadeFinetune:
 
-    def __init__(self, sft_data_list, validation_size=1000):
+    def __init__(self, sft_data_list, batch_size, validation_size=1000):
         total_data = sft_data_list
 
         # reserve the same constant part for validation test
@@ -148,59 +143,32 @@ class DataLoadeFinetune:
         self.train_data = _tmp_input[len(_tmp_input) // 10:]
         self.test_data = _tmp_input[:len(_tmp_input) // 10]
 
-        #print(f"data length, train_data: {len(self.train_data)}, test_data: {len(self.test_data)}")
-        self.train_position = 0
-        self.test_position = 0
-        self.val_position = 0
-    
+        self.train_loader = DataLoader(SVITDataset(self.train_data, batch_size=None, worker=4, shuffle=True))
+        self.test_loader = DataLoader(SVITDataset(self.test_data, batch_size=None, worker=4, shuffle=True))
+        self.val_loader = DataLoader(SVITDataset(self.val_data, batch_size=None, worker=4, shuffle=True))
 
-    def reset(self):
-        self.train_position = 0
-        self.test_position = 0
-        self.val_position = 0
+        self.train_iter = iter(self.train_loader)
+        self.test_iter = iter(self.test_loader)
+        self.val_iter = iter(self.val_loader)
 
 
     def training_data_size(self):
         return len(self.train_data)
 
 
-    def __fetch_data__(self, data_buf, position, batch_size):
-        current_position = position
-
-        buf = data_buf[current_position: current_position + batch_size]
-        current_position += batch_size
-
-        if current_position > len(data_buf):
-            current_position = current_position % len(data_buf)
-            buf.extend(data_buf[:current_position])
-
-        input_ids, attention_masks, image_batch_tensor, labels = convert_to_tensor(buf)
-
-        return input_ids, attention_masks, image_batch_tensor, labels, current_position
-
-
-    def get_train_batch(self, batch_size):
-        input_ids, attention_masks, image_batch_tensor, labels, position = self.__fetch_data__(
-            self.train_data, self.train_position, batch_size
-        )
-        self.train_position = position
-
-        return input_ids, attention_masks, image_batch_tensor, labels
-
-
-    def get_test_batch(self, batch_size):
-        input_ids, attention_masks, image_batch_tensor, labels, position = self.__fetch_data__(
-            self.test_data, self.test_position, batch_size
-        )
-        self.test_position = position
-        return input_ids, attention_masks, image_batch_tensor, labels
+    def next_train_batch(self):
+        input_ids, attention_masks, image_tensor, labels = next(self.train_iter)
+        return input_ids, attention_masks, image_tensor, labels
     
-    def get_val_batch(self, batch_size):
-        input_ids, attention_masks, image_batch_tensor, labels, position = self.__fetch_data__(
-            self.val_data, self.val_position, batch_size
-        )
-        self.val_position = position
-        return input_ids, attention_masks, image_batch_tensor, labels
+    def next_test_batch(self):
+        input_ids, attention_masks, image_tensor, labels = next(self.test_loader)
+        return input_ids, attention_masks, image_tensor, labels
+    
+    def next_val_batch(self):
+        input_ids, attention_masks, image_tensor, labels = next(self.val_iter)
+        return input_ids, attention_masks, image_tensor, labels
+
+
 
 
 
@@ -226,7 +194,16 @@ def configure_optimizers(model, weight_decay, learning_rate):
     return optimizer
 
 
-def instruction_finetune(model, device, dataloader, batch_size, grad_accum_steps, learning_rate, epoch):
+def instruction_finetune(
+        model: QwenVL, 
+        device: str, 
+        dataloader: DataLoadeFinetune, 
+        batch_size: int, 
+        grad_accum_steps: int, 
+        learning_rate: float, 
+        epoch: int
+    ):
+
     finetune_steps = dataloader.training_data_size() // (batch_size * grad_accum_steps) * epoch
     print(f"Finetuning steps: {finetune_steps}")
 
@@ -243,7 +220,7 @@ def instruction_finetune(model, device, dataloader, batch_size, grad_accum_steps
                 test_steps = 10
                 test_loss_accum = 0
                 for _ in range(test_steps):
-                    text, mask, img, labels = dataloader.get_test_batch(batch_size)
+                    text, mask, img, labels = dataloader.next_test_batch(batch_size)
                     text, mask, img, labels = \
                         text.to(device), mask.to(device), img.to(device), labels.to(device)
                     logits, loss = model(input_ids=text, attention_masks=mask, img_tensor=img, labels=labels)
@@ -259,7 +236,7 @@ def instruction_finetune(model, device, dataloader, batch_size, grad_accum_steps
         loss_accum = 0.0
 
         for _ in range(grad_accum_steps):
-            text, mask, img, labels = dataloader.get_train_batch(batch_size)
+            text, mask, img, labels = dataloader.next_train_batch(batch_size)
             text, mask, img, labels = \
                 text.to(device), mask.to(device), img.to(device), labels.to(device)
 
@@ -303,8 +280,11 @@ def training_loop():
     epoch = 2
 
     # config dataloader
-    total_data_list = parallel_process_sft_data(SFT_JSON_DATA)
-    dataloader = DataLoadeFinetune(total_data_list)
+    with open(SFT_JSON_DATA) as pfile:
+        json_list = json.load(pfile)
+
+    total_data_list = process_sft_data(json_list)
+    dataloader = DataLoadeFinetune(total_data_list, batch_size)
     print(f"total training data: {dataloader.training_data_size()}")
 
 
