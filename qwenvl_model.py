@@ -140,8 +140,10 @@ class QwenVL(nn.Module):
         input_masks = torch.cat((img_mask, attention_masks), dim=1)
 
         # add extra negative labels
-        extra_labels = torch.zeros(B, Q + 2, dtype=labels.dtype, device=labels.device).fill_(-100)
-        output_labels = torch.cat((extra_labels, labels), dim=1)
+        output_labels = labels
+        if labels:
+            extra_labels = torch.zeros(B, Q + 2, dtype=labels.dtype, device=labels.device).fill_(-100)
+            output_labels = torch.cat((extra_labels, labels), dim=1)
 
         output = self.llm_backbone(inputs_embeds=input_embds, attention_mask=input_masks, labels=output_labels)
         return output.logits, output.loss

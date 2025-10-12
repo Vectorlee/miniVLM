@@ -20,15 +20,15 @@ im_end = qwen_tokenizer("<|im_end|>").input_ids[0]
 
 def generate(model, input_ids, attention_masks, img_tensor, temperature, max_steps):
     B, T = input_ids.shape
-    finish_mask = torch.zeros(B, dtype=torch.int64, device=input_ids.device)
+    finish_index = torch.zeros(B, dtype=torch.int64)
 
     img_tokens_len = model.config.query_size + 2
     for _ in range(max_steps):
         logits, _ = model(input_ids, attention_masks, img_tensor)   # [B, T, vocab_size]
 
         # there are <im_start> [img_query] <im_end> in the front
-        last_logit_indexes = attention_masks.sum(dim=1) + img_tokens_len - 1 
-        last_logit = logits[torch.arange(B, device=input_ids.device), last_logit_indexes]
+        last_logit_indexes = attention_masks.sum(dim=1) - 1
+        last_logit = logits[torch.arange(B, device=input_ids.device), last_logit_indexes + img_tokens_len]
 
         # expend the length of input tensors
         pad_tensor = torch.zeros(B, 1, dtype=torch.int64, device=input_ids.device)
@@ -45,44 +45,58 @@ def generate(model, input_ids, attention_masks, img_tensor, temperature, max_ste
             next_tokens = torch.multinomial(probs, num_samples=1).squeeze()
         
         # assign the next token and attention mask
-        input_ids[torch.arange(B, device=input_ids.device), last_logit_indexes - img_tokens_len + 1] = next_tokens
-        attention_masks[torch.arange(B, device=input_ids.device), last_logit_indexes - img_tokens_len + 1] = 1
+        input_ids[torch.arange(B, device=input_ids.device), last_logit_indexes] = next_tokens
+        attention_masks[torch.arange(B, device=input_ids.device), last_logit_indexes] = 1
 
         # if we hit the endoftext token, mark it in the finish_mask 
-        idx = torch.nonzero(next_tokens == im_end, as_tuple=False).squeeze()
-        finish_mask[idx] = 1
-        if finish_mask.sum() == B:
+        idxs = torch.nonzero(next_tokens == im_end, as_tuple=False).squeeze().tolist()
+        for i in idxs:
+            finish_index[i] = finish_index[i] if finish_index[i] != 0 else last_logit_indexes[i].item() + 1
+
+        if torch.nonzero(finish_index).shape[0] == B:
             break
 
-    return input_ids, attention_masks
+    return input_ids, attention_masks, finish_index
 
 
-def decode_generation(input_ids):
+def decode_generation(input_ids, attention_masks, finish_index):
     B, T = input_ids.shape
+    indexes = attention_masks.sum(dim=1).tolist()
+    
     answer_list = []
-
     for i in range(B):
         sequence = input_ids[i].tolist()
-        index = sequence.index(im_end) if im_end in sequence else len(sequence)
-        sequence = sequence[:index]
+        if finish_index[i] > 0:
+            sequence = sequence[:finish_index[i]]
+        else:
+            sequence = sequence[:indexes[i]]
         answer_list.append(qwen_tokenizer.decode(sequence))
 
     return answer_list
 
 
 def vision_language_generation(model, img_file, prompt, temperature=0.8):
-    device = model.device
+    device = next(model.parameters()).device
 
-    img_tensor = load_image(img_file, resolution=224)
-    tokens = qwen_tokenizer(prompt)
+    img_tensor = load_image(img_file, resolution=224).unsqueeze(0)
+
+    prompt_messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": prompt}
+    ]
+    prompt_tokens = qwen_tokenizer.apply_chat_template(
+        prompt_messages,
+        tokenize=True,
+        add_generation_prompt=True
+    )
 
     # [1, token_len]
-    input_ids = torch.tensor(tokens.input_ids).unsqueeze(0)
-    attention_mask = torch.tensor(tokens.attention_mask).unsqueeze(0)
+    input_ids = torch.tensor(prompt_tokens).unsqueeze(0)
+    attention_mask = torch.ones(len(prompt_tokens), dtype=torch.int64).unsqueeze(0)
     input_ids, attention_mask, img_tensor = input_ids.to(device), attention_mask.to(device), img_tensor.to(device)
     
     with torch.no_grad():
-        answer, _ = generate(
+        answer, mask, finish_index = generate(
             model = model, 
             input_ids = input_ids,
             attention_masks = attention_mask,
@@ -91,7 +105,7 @@ def vision_language_generation(model, img_file, prompt, temperature=0.8):
             max_steps = 100
         )
 
-    output = decode_generation(answer)
+    output = decode_generation(answer, mask, finish_index)
     return output
 
 

@@ -52,11 +52,18 @@ def load_image(filename, resolution):
     return img_tensor
 
 
-def strip_state_prefix(state_dict, prefix="_orig_mod.module."):
+def strip_state_prefix(state_dict, custom_prefix="_orig_mod.module."):
+    ddp_prefix = "_orig_mod.module."
+    regular_prefix = "_orig_mod."
+
     new_state_dict = {}
     for k, v in state_dict.items():
-        if k.startswith(prefix):
-            new_key = k[len(prefix):]
+        if k.startswith(ddp_prefix):
+            new_key = k[len(ddp_prefix):]
+        elif k.startswith(regular_prefix):
+            new_key = k[len(regular_prefix):]
+        elif k.startswith(custom_prefix):
+            new_key = k[len(custom_prefix):]
         else:
             new_key = k
         new_state_dict[new_key] = v
