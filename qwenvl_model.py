@@ -76,13 +76,27 @@ class QwenVL(nn.Module):
         self.adapter = VLAdaptor(config)
 
     
-    def init_vision_encoder(self, clip_model_file):
+    def init_vision_encoder_from_clip(self, clip_model_file):
         vit_prefix = "vision_encoder."
 
         with torch.no_grad():
             state_dict = strip_state_prefix(torch.load(clip_model_file))
             sub_dict = {k.replace(vit_prefix, ""): v for k, v in state_dict.items() if k.startswith(vit_prefix)}
             self.vision_encoder.load_state_dict(sub_dict)
+        return
+
+    def init_vision_encoder(self, vit_model_file):
+
+        with torch.no_grad():
+            state_dict = strip_state_prefix(torch.load(vit_model_file))
+            self.vision_encoder.load_state_dict(state_dict)
+        return
+    
+    def init_adapter(self, adapter_model_file):
+
+        with torch.no_grad():
+            state_dict = strip_state_prefix(torch.load(adapter_model_file))
+            self.adapter.load_state_dict(state_dict)
         return
 
     def freeze_llm_backbone(self):
@@ -102,7 +116,7 @@ class QwenVL(nn.Module):
         # text imbeddings [B, T, C]
         text_embds = self.llm_backbone.model.embed_tokens(input_ids)
 
-        # [B, 1, C]
+        # expand the bracket tokens to match batch size [B, 1, C]
         im_start_embds = self.llm_backbone.model.embed_tokens(torch.tensor([im_start], device=img_tensor.device)).expand(B, 1, -1)
         im_end_embds = self.llm_backbone.model.embed_tokens(torch.tensor([im_end], device=img_tensor.device)).expand(B, 1, -1)
 

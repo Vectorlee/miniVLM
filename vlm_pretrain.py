@@ -25,7 +25,7 @@ def load_qwenvl_model(train_config: TrainingParam):
 
     model = QwenVL(QwenVLConfig())
     # load the pretrained vision_encoder
-    model.init_vision_encoder(clip_model_file)
+    model.init_vision_encoder_from_clip(clip_model_file)
     # freeze the llm backbone, prevent it from pre-training
     model.freeze_llm_backbone()
 
@@ -49,14 +49,17 @@ def load_qwenvl_model(train_config: TrainingParam):
 # ------------ Main Training Code ---------------
 
 train_param = TrainingParam(
-    max_lr = 2e-4,
-    min_lr = 2e-5,
-    num_epoch = 32,
+    # here we use an extra small learning rate based on experiment result,
+    # as the llm and vision encoder are both pretrained
+    max_lr = 3e-6,
+    min_lr = 3e-7,
+    num_epoch = 1,
     
-    max_steps = 6000,
-    warmup_steps = 1000,
+    max_steps = 7000,
+    warmup_steps = 1500,
+    val_steps = 10,
 
-    total_batch_size = 8196, # 2**13
+    total_batch_size = 1024, # 2**13
     micro_batch_size = 32,  # micro batch size
     grad_accum_steps = 4
 )

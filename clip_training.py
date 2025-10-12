@@ -65,7 +65,19 @@ def all_gather_with_grad(tensor):
 
 # ------------ Main Training Code ---------------
 
-train_param = TrainingParam()
+train_param = TrainingParam(
+    max_lr = 5e-4,
+    min_lr = 5e-5,
+    num_epoch = 32,
+    
+    max_steps = 6000 * 32,
+    warmup_steps = 2000,
+    val_steps = 10,
+
+    total_batch_size = 8196, # 2**13
+    micro_batch_size = 1024,  # micro batch size
+    grad_accum_steps = 1
+)
 
 # config DDP settings
 train_param = config_ddp(train_param)
