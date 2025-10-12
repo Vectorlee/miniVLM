@@ -159,7 +159,7 @@ for step in range(train_param.max_steps):
                     loss.backward()
             else:
                 # without the no_sync context manager here
-                ogits, loss = model(input_ids=text, attention_masks=mask, img_tensor=img, labels=labels)
+                logits, loss = model(input_ids=text, attention_masks=mask, img_tensor=img, labels=labels)
                 loss = loss / train_param.grad_accum_steps
                 loss_accum += loss.detach()
                 # For the ddp case, the gradients will be synchronized across devices

@@ -1,5 +1,7 @@
 *.ipynb
 __pycache__
 clip_data/
+vlm_data/
 
-!clip_data/process_laion_data.py
+!clip_data/download_laion400m.sh
+!vlm_data/svit_downloader.py

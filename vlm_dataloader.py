@@ -127,12 +127,12 @@ class DataLoaderLite:
         # token_batch: [(prompt_tokens, full_tokens, caption_token)]
 
         input_tokens = [full_tokens for _, full_tokens, _ in token_batch]
-        prompt_tokens = [prompt_tokens for prompt_tokens, _, _ in token_batch]
+        question_tokens = [prompt_tokens for prompt_tokens, _, _ in token_batch]
 
         input_ids, attention_masks = get_padding_batch_input(input_tokens)
         labels = input_ids.clone()
         for i in range(input_ids.shape[0]):
-            labels[i, :len(prompt_tokens[i])] = -100
+            labels[i, :len(question_tokens[i])] = -100
         
         return input_ids, attention_masks, labels
 
