@@ -141,7 +141,7 @@ class QwenVL(nn.Module):
 
         # add extra negative labels
         output_labels = labels
-        if labels:
+        if labels is not None:
             extra_labels = torch.zeros(B, Q + 2, dtype=labels.dtype, device=labels.device).fill_(-100)
             output_labels = torch.cat((extra_labels, labels), dim=1)
 

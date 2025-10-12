@@ -16,6 +16,7 @@ torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
+torch.set_float32_matmul_precision('high')
 
 # training config settings
 MODEL_DIR = "./model/"
@@ -90,6 +91,8 @@ def process_sft_data(json_list):
                     tokenize=True,
                     add_generation_prompt=False
                 )
+                if len(full_tokens) > 250:
+                    break
                 batch_data.append((image_file, prompt_tokens, full_tokens))
     
     return batch_data
@@ -162,7 +165,7 @@ class DataLoadeFinetune:
         return input_ids, attention_masks, image_tensor, labels
     
     def next_test_batch(self):
-        input_ids, attention_masks, image_tensor, labels = next(self.test_loader)
+        input_ids, attention_masks, image_tensor, labels = next(self.test_iter)
         return input_ids, attention_masks, image_tensor, labels
     
     def next_val_batch(self):
@@ -214,14 +217,18 @@ def instruction_finetune(
     for step in range(finetune_steps):
         t0 = time.time()
         
+        # checkpoint model
+        if step % 500 == 0 or step == finetune_steps - 1:
+            torch.save(model.state_dict(), os.path.join(MODEL_DIR, f"model_{step}.pth"))
+
         # validation loop
-        if step % 200 == 0 or step == finetune_steps - 1:
+        if step % 100 == 0 or step == finetune_steps - 1:
             model.eval()
             with torch.no_grad():
                 test_steps = 10
-                test_loss_accum = 0
+                test_loss_accum = 0.0
                 for _ in range(test_steps):
-                    text, mask, img, labels = dataloader.next_test_batch(batch_size)
+                    text, mask, img, labels = dataloader.next_test_batch()
                     text, mask, img, labels = \
                         text.to(device), mask.to(device), img.to(device), labels.to(device)
                     logits, loss = model(input_ids=text, attention_masks=mask, img_tensor=img, labels=labels)
@@ -237,7 +244,7 @@ def instruction_finetune(
         loss_accum = 0.0
 
         for _ in range(grad_accum_steps):
-            text, mask, img, labels = dataloader.next_train_batch(batch_size)
+            text, mask, img, labels = dataloader.next_train_batch()
             text, mask, img, labels = \
                 text.to(device), mask.to(device), img.to(device), labels.to(device)
 
@@ -293,7 +300,7 @@ def training_loop():
     model = instruction_finetune(
         model = model, 
         device = device,
-        dataloaer = dataloader,
+        dataloader = dataloader,
         batch_size = batch_size,
         grad_accum_steps = grad_accum_steps,
         learning_rate = learning_rate, 
