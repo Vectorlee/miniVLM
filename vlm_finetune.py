@@ -2,10 +2,9 @@ import json
 import torch
 import torch.nn.functional as F
 import random
-import pandas as pd
-import numpy as np
 import time
 import os
+from multiprocessing import Pool
 
 from qwenvl_model import QwenVLConfig, QwenVL, qwen_tokenizer
 from util import get_padding_batch_input, load_image
@@ -17,7 +16,19 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
 
-def prepare_prompt_tokens(json_list, image_dir, image_resolution):
+# training config settings
+MODEL_DIR = "./model/"
+VIT_MODEL_FILE = "./model/vit_pretrain.pth"
+ADAPTER_MODEL_FILE = "./model/adapter_pretrain.pth"
+
+IMAGE_DIR = "./vlm_data/image_data/"
+SFT_JSON_DATA = "./vlm_data/conversation.json"
+
+IMAGE_RESOLUTION = 224
+
+
+
+def prepare_prompt_tokens(json_list):
     """
     'image_id': 306,
     'conversations': [
@@ -41,12 +52,12 @@ def prepare_prompt_tokens(json_list, image_dir, image_resolution):
 
     for element in json_list:
         image_id = element["image_id"]
-        image_file = f"{image_dir}/{image_id}.jpg"
+        image_file = f"{IMAGE_DIR}/{image_id}.jpg"
 
         if not os.path.isfile(image_file):
             # if the image file doesn't exist, skip entirely
             continue
-        image_tensor = load_image(image_file, image_resolution)
+        image_tensor = load_image(image_file, IMAGE_RESOLUTION)
 
         for conversation in element["conversations"]:
             content = conversation["content"]
@@ -84,6 +95,28 @@ def prepare_prompt_tokens(json_list, image_dir, image_resolution):
     return batch_data
 
 
+def parallel_process_sft_data(sft_json_file):
+    total_data_list = []
+
+    # load the file
+    with open(sft_json_file) as pfile:
+        json_list = json.load(pfile)
+
+    chunk_list = [] 
+    chunk_size = len(json_list) // 600
+    for index in range(0, len(json_list), chunk_size):
+        part = json_list[index: index + chunk_size]
+        chunk_list.append(part)
+
+
+    worker_count = os.cpu_count()
+    with Pool(processes=worker_count) as pool:
+        for batch_data in pool.imap_unordered(prepare_prompt_tokens, chunk_list):
+            total_data_list.extend(batch_data)
+    
+    return total_data_list
+
+
 def convert_to_tensor(batch_data):
 
     image_tensors   = [img_tensor for img_tensor, _, _ in batch_data]
@@ -102,14 +135,8 @@ def convert_to_tensor(batch_data):
 
 class DataLoadeFinetune:
 
-    def __init__(self, sft_json_file, image_dir, validation_size=1000):
-        self.image_resultion = 224
-
-        # load the file
-        with open(sft_json_file) as pfile:
-            json_list = json.load(pfile)
-
-        total_data = prepare_prompt_tokens(json_list, image_dir, self.image_resultion)
+    def __init__(self, sft_data_list, validation_size=1000):
+        total_data = sft_data_list
 
         # reserve the same constant part for validation test
         self.val_data = total_data[:validation_size]
@@ -259,14 +286,9 @@ def instruction_finetune(model, device, dataloader, batch_size, grad_accum_steps
 
 
 def training_loop():
-    VIT_MODEL_FILE = "./clip_data/vit_pretrain.pth"
-    ADAPTER_MODEL_FILE = "./clip_data/adapter_pretrain.pth"
-    IMAGE_DIR = "./vlm_data/image_data/"
-    SFT_JSON_DATA = "./vlm_data/conversation.json"
-    MODEL_DIR = "./model/"
-
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
+    # config model
     model = QwenVL(QwenVLConfig())
     model.init_vision_encoder(VIT_MODEL_FILE)
     model.init_adapter(ADAPTER_MODEL_FILE)       
@@ -274,12 +296,15 @@ def training_loop():
     model.adapter = torch.compile(model.adapter)
     model.vision_encoder = torch.compile(model.vision_encoder)
 
+    # config parameter
     batch_size = 32
     grad_accum_steps = 8
     learning_rate = 1e-5
     epoch = 2
 
-    dataloader = DataLoadeFinetune(SFT_JSON_DATA, IMAGE_DIR)
+    # config dataloader
+    total_data_list = parallel_process_sft_data(SFT_JSON_DATA)
+    dataloader = DataLoadeFinetune(total_data_list)
     print(f"total training data: {dataloader.training_data_size()}")
 
 
