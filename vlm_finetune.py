@@ -10,6 +10,8 @@ from tqdm import tqdm
 from qwenvl_model import QwenVLConfig, QwenVL, qwen_tokenizer
 from util import get_padding_batch_input, load_image
 
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 # set the random seed to ensure reproducibility
 random.seed(1337)
 torch.manual_seed(1337)
@@ -66,6 +68,7 @@ def process_sft_data(json_list):
                 {"role": "system", "content": "You are a helpful assistant."},
             ]
 
+            skip = False
             for i in range(0, len(content), 2):
                 # skip conversations longer than 3 turns, 7 = 1 + 3 * 2 
                 if len(prompt_messages) >= 7:
@@ -75,39 +78,37 @@ def process_sft_data(json_list):
                 model_answer = content[i + 1]
                 if user_prompt["from"] != "user" or model_answer["from"] != "gpt":
                     # invalid data, skip
+                    skip = True
                     break
                 if len(user_prompt["value"]) < 1 or len(model_answer["value"]) < 1:
+                    skip = True
                     break
 
                 prompt_messages.append({"role": "user", "content": user_prompt["value"]})
-                prompt_tokens = qwen_tokenizer.apply_chat_template(
-                    prompt_messages,
-                    tokenize=True,
-                    add_generation_prompt=True
-                )
                 prompt_messages.append({"role": "assistant", "content": model_answer["value"]})
-                full_tokens = qwen_tokenizer.apply_chat_template(
-                    prompt_messages,
-                    tokenize=True,
-                    add_generation_prompt=False
-                )
-                if len(full_tokens) > 250:
-                    break
-                batch_data.append((image_file, prompt_tokens, full_tokens))
+            
+            full_tokens = qwen_tokenizer.apply_chat_template(
+                prompt_messages,
+                tokenize=True,
+                add_generation_prompt=False
+            )
+            if not skip:
+                batch_data.append((image_file, full_tokens))
     
     return batch_data
 
 
 def convert_to_tensor(batch_data):
 
-    image_files     = [img_file for img_file, _, _ in batch_data]
-    input_tokens    = [full_tokens for _, _, full_tokens in batch_data]
-    question_tokens = [prompt_tokens for _, prompt_tokens, _ in batch_data]
+    image_files     = [img_file for img_file, _ in batch_data]
+    input_tokens    = [full_tokens for _, full_tokens in batch_data]
 
     input_ids, attention_masks = get_padding_batch_input(input_tokens)
     labels = input_ids.clone()
+
+    seq_length = attention_masks.sum(dim=1)
     for i in range(input_ids.shape[0]):
-        labels[i, :len(question_tokens[i])] = -100
+        labels[i, seq_length[i]:] = -100
     
     image_tensor_list = []
     for img_file in image_files:
@@ -282,7 +283,7 @@ def training_loop():
     model.vision_encoder = torch.compile(model.vision_encoder)
 
     # config parameter
-    batch_size = 32
+    batch_size = 16
     grad_accum_steps = 8
     learning_rate = 1e-5
     epoch = 2
