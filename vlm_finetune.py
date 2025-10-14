@@ -265,7 +265,7 @@ def instruction_finetune(
 
         dt = (t1 - t0)
         # the item() function ship the tensor back from gpu to cpu
-        print(f"step {step}, loss: {loss.item():.6f}, dt: {dt * 1000:.2f}ms, norm: {norm:.4f}")
+        print(f"step {step}, loss: {loss_accum.item():.6f}, dt: {dt * 1000:.2f}ms, norm: {norm:.4f}")
     
     return model
 

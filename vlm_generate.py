@@ -3,9 +3,10 @@ from torch.nn.utils.rnn import pad_sequence
 import torch
 import random
 import argparse
+import os
 
 from qwenvl_model import QwenVL, QwenVLConfig, qwen_tokenizer
-from util import load_image
+from util import load_image, strip_state_prefix
 
 
 random.seed(1337)
@@ -75,20 +76,19 @@ def decode_generation(input_ids, attention_masks, finish_index):
     return answer_list
 
 
-def vision_language_generation(model, img_file, prompt, temperature=0.8):
+def decode_one_response(respose_token, prompt_token):
+    answer_token = respose_token[len(prompt_token):]
+    answer = qwen_tokenizer.decode(answer_token).strip()
+
+    answer = answer[len("<|im_start|>"): ] if answer.startswith("<|im_start|>") else answer
+    answer = answer[: -len("<|im_end|>")] if answer.endswith("<|im_end|>") else answer
+    return answer
+
+
+def vision_language_generation(model, img_file, prompt_tokens, temperature=0.8):
     device = next(model.parameters()).device
-
+    
     img_tensor = load_image(img_file, resolution=224).unsqueeze(0)
-
-    prompt_messages = [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": prompt}
-    ]
-    prompt_tokens = qwen_tokenizer.apply_chat_template(
-        prompt_messages,
-        tokenize=True,
-        add_generation_prompt=True
-    )
 
     # [1, token_len]
     input_ids = torch.tensor(prompt_tokens).unsqueeze(0)
@@ -104,8 +104,11 @@ def vision_language_generation(model, img_file, prompt, temperature=0.8):
             temperature = temperature,
             max_steps = 100
         )
+    
+    output = answer[0]
+    if finish_index[0] > 0:
+        output = output[:finish_index[0]]
 
-    output = decode_generation(answer, mask, finish_index)
     return output
 
 
@@ -113,29 +116,54 @@ def main():
     parser = argparse.ArgumentParser(description="Example script that takes two string arguments.")
     parser.add_argument("--model", type=str, required=True, help="The saved model pth file")
     parser.add_argument("--image", type=str, required=True, help="The image file")
-    parser.add_argument("--prompt", type=str, required=True, help="The text prompt")
-    
-    args = parser.parse_args()
 
-    # TODO: add the code
+    args = parser.parse_args()
+    model_file = args.model
+    image_file = args.image
+
+    if not os.path.isfile(model_file):
+        print(f"Model file {model_file} does not exist")
+        return
+    if not os.path.isfile(image_file):
+        print(f"Image file {image_file} does not exist")
+        return
+
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    model = QwenVL(QwenVLConfig())
+    model.load_state_dict(strip_state_prefix(torch.load(model_file)))
+    model = model.to(device)
+
+    prompt1 = input("User Prompt: ")
+
+    prompt_messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": prompt1}
+    ]
+    prompt_tokens1 = qwen_tokenizer.apply_chat_template(
+        prompt_messages,
+        tokenize=True,
+        add_generation_prompt=True
+    )
+    response_tokens1 = vision_language_generation(model, image_file, prompt_tokens1)
+    answer1 = decode_one_response(response_tokens1, prompt_tokens1)
+    print(f"Assistant: {answer1}")
+
+    prompt2 = input("User Prompt: ")
+    prompt_messages.append({"role": "assistant", "content": answer1})
+    prompt_messages.append({"role": "user", "content": prompt2})
+    prompt_tokens2 = qwen_tokenizer.apply_chat_template(
+        prompt_messages,
+        tokenize=True,
+        add_generation_prompt=True
+    )
+    response_tokens2 = vision_language_generation(model, image_file, prompt_tokens2)
+    answer2 = decode_one_response(response_tokens2, prompt_tokens2)
+    print(f"Assistant: {answer2}")
+
+    return
 
 
 
 if __name__ == "__main__":
-    VIT_MODEL_FILE = "./clip_data/vit_pretrain.pth"
-    ADAPTER_MODEL_FILE = "./clip_data/adapter_pretrain.pth"
-    
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-    model = QwenVL(QwenVLConfig())
-
-    model.init_vision_encoder(VIT_MODEL_FILE)
-    model.init_adapter(ADAPTER_MODEL_FILE)       
-    model = model.to(device)
-    model.eval()
-
-    input_prompt = "Please describe the content of this image"
-    input_image = "./clip_data/test_imge.jpg"
-    
-    output = vision_language_generation(model, input_image, input_prompt)
-    print(output)
+    main()
