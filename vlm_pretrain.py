@@ -21,7 +21,7 @@ if torch.cuda.is_available():
 
 
 def load_qwenvl_model(train_config: TrainingParam):
-    clip_model_file = "./clip_data/clip_pretrain.pth"
+    clip_model_file = "./model/clip_pretrain.pth"
 
     model = QwenVL(QwenVLConfig())
     # load the pretrained vision_encoder

@@ -8,7 +8,7 @@ from text_encoder import TextEncoderConfig
 from vision_transformer import VisionTransformerConfig
 from util import gpt_tokenize, get_padding_batch_input, strip_state_prefix
 
-MODEL_FILE = "./clip_data/clip_pretrain.pth"
+MODEL_FILE = "./model/clip_pretrain.pth"
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
