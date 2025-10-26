@@ -131,7 +131,7 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     model = QwenVL(QwenVLConfig())
-    model.load_state_dict(strip_state_prefix(torch.load(model_file)))
+    model.load_state_dict(strip_state_prefix(torch.load(model_file, weights_only=True)))
     model = model.to(device)
 
     prompt1 = input("User Prompt: ")

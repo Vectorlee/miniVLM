@@ -73,9 +73,9 @@ After training the CLIP model, we pick out the vision encoder (the ViT model), a
         |___svit_downloader.py  # downloader of the finetuning data
 
 
-We loosely follow the QwenVL model architecture. We connect the ViT vision encoder we get from CLIP, with a [Qwen2.5-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct) model. We use an adapter model to connect them. 
+We loosely follow the QwenVL model architecture. We connect the ViT vision encoder we get from CLIP, with a [Qwen2.5-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct) LLM model. We use an adapter model as the bridge between them. 
 
-The adapter model uses a cross-attention layer to transfer the vision encoding into Qwen2.5-3B's text embedding. Given an image, our ViT model will produce 196 vision embeddings, each with 768 dimensions. We use a set of 196 learnable query vectors, and calculate cross-attention with the 196 vision embeddings, and convert them into 196 embeddings with dimension 2048. 2048 is the size of the text embeddings in the Qwen2.5-3B model, so we can directly feed these embeddings into the LLM model. The detail model code is in the `qwenvl_model.py` file.
+The adapter model uses a cross-attention layer to transfer vision encodings to Qwen2.5-3B-Instruct's text embeddings. Given an image, our ViT model will produce 196 vision embeddings, each with 768 dimensions. We use a set of 196 learnable query vectors, and calculate cross-attention with the original 196 vision embeddings, and convert them into 196 embeddings with dimension of 2048. 2048 is the dimension of the text embeddings in the Qwen2.5-3B-Instruct model, so we can feed these embeddings into the LLM model as input. The detail model code is in the `qwenvl_model.py` file.
 
 #### Training setup
 
@@ -85,21 +85,21 @@ To train such a VLM model, we need two-stage training:
 2. Fine-tune the all model with vision-instruction-answer data, so the VLM learns to answer questions conditioned on images.
 
 
-##### Pre-Training
+#### Pre-Training
 
 In the pretraining, we again use the LAION-400m dataset. We downloaded another set of 8M image-caption pairs, disjoint with the data that we used to train the CLIP model, to train the model. Given an image, we construct the input text with something like:
 ```
 Provide a brief description of the given image.
 ```
-And use the image's caption as the output for the LLM. Here we reuse Qwen model's prompt template, so the actual input to the LLM looks like:
+And use the image's original caption as the output for the LLM. Here we reuse Qwen model's prompt template, which one can get by using the `tokenizer.apply_chat_template` API. The final input to the LLM backbone looks like:
 
 ```
-<|im_start|>[image embeddings]<|im_end|>
+<|im_start|>[image embeddings from vision encoder and adapter]<|im_end|>
 <|im_start|>user:\nProvide a brief description of the given image.<|im_end|>\n
 <|im_start|>assistant:\n[image captions...]<|im_end|>
 ```
 
-During pre-training, we freeze the parameters of the LLM and only train the vision encoder and adapter. Note here we initially train our CLIP model with the GPT2 tokenizer, but now we train the VLM with Qwen2.5 tokenizer. This pre-training will teach the vision encoder to align the learned image features with the new text space.
+During pre-training, we **freeze the parameters of the LLM and only train the vision encoder and adapter**. This step trains the vision encoder and adapter to properly project the vision embeddings to the LLM's embedding space. Note here we initially train our CLIP model with the GPT2 tokenizer, but now we train the VLM with Qwen2.5 tokenizer. This pre-training will teach the vision encoder to align the learned image features with the new text space.
 
 The training config:
 - **Global Batch Size**: 1024 image-caption pairs per step
@@ -108,16 +108,50 @@ The training config:
 - **Gradient Accumulate Steps**: 4
 - **Training Epoch**: 1
 
-Now the training loss is the standard transformer cross entropy, so we can use gradient accumulate to enlarge the global batch size for our pretraining. The traininig process is just like the standard LLM finetuning process, and we set target of the padding tokens, question tokens, and image embedding tokens to -100 during cross entropy computation. Here is the loss graph: 
+Note here the training loss is the standard transformer cross entropy, so we can use gradient accumulate to enlarge the global batch size for our pretraining. The traininig process is just like the standard LLM finetuning process, where we set labels of the padding tokens, question tokens and image embedding to -100 during cross entropy computation. Here is the loss graph: 
 
 ![VLM Pretrain Loss](./image/vlm_pretrain_loss.png)
 
-##### Fine-Tuning
+#### Fine-Tuning
 
-The pre-training stage trains the vision encoder and adapter to correctly map the vision embeddings into our LLM's text embedding space. Now we use vision instruction answer data to train our VLM end-to-end to enable it to answer visual questions.
+The pre-training stage trains the vision encoder and adapter to correctly map the vision embeddings into our LLM's text embedding space. After this step, given an image, the VLM will just output the caption like sentences for that image. We need to use vision question-answer data to train our VLM end-to-end to turn it into a vision chatbot.
 
-We used the [SVIT](https://huggingface.co/datasets/BAAI/SVIT) dataset, and only used 1.6M visual conversation data. We used 1 H200 GPU and finetuned the entire model for 2 epochs, we didn't freeze any parts in the finetuning stage. Here is the loss graph:
+We used the [SVIT](https://huggingface.co/datasets/BAAI/SVIT) dataset, and only used the 1.6M visual conversation data. We used one H200 GPU and finetuned the entire model for 2 epochs, we didn't freeze any parts in the this stage. Here is the loss graph:
 
 ![VLM Finetune Loss](./image/vlm_finetune_loss.png)
 
-After this step, we will get a working VLM chatbot
+After this step, we will get a working VLM chatbot.
+
+#### VLM Generation
+We wrote a simple vlm chatting program in the `vlm_generation.py`. It takes the model file and image as input, and prompts user to type questions to ask the VLM model.
+
+```
+$ python vlm_generate.py  -h
+usage: vlm_generate.py [-h] --model MODEL --image IMAGE
+
+Example script that takes two string arguments.
+
+options:
+  -h, --help     show this help message and exit
+  --model MODEL  The saved model pth file
+  --image IMAGE  The image file
+```
+
+Given this image:
+
+![car image](./image/car.jpeg)
+
+We can ask simple quesitons using our finetuned VLM model:
+
+![vlm car chat](./image/car_qa.png)
+
+Given this image:
+
+![obama image](./image/obama.jpg)
+
+We can ask questions like:
+
+![vlm obama chat](./image/obama_qa.png)
+
+Note that our vision encoder is a small model trained with limited data, so it will make mistakes on image details.
+
