@@ -35,7 +35,7 @@ The training config:
 - **Training Epoch**: 8
 
 
-We trained the CLIP model with linear warmup and cosine decay. Initially we set the learning rate too low and cosine decay too fast. After seeing the loss is dropping too slowly, we checkpointed the model and restrated the training with a higher learing rate and a slower cosine decay, this helped us evetually reached a good final loss.
+We utilize the pytorch `DistributedDataParallel` library to train our CLIP model, and train the model with linear warmup and cosine decay. Initially we set the learning rate too low and cosine decay too fast. After seeing the loss is dropping too slowly, we checkpointed the model and restrated the training with a higher learing rate and a slower cosine decay, this helped us evetually reached a good final loss.
 
 ![CLIP Loss](./image/clip_loss.png)
 
